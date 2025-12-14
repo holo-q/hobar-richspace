@@ -1,0 +1,62 @@
+[package]
+name = "xfce4-panel-richspace"
+version = "0.1.0"
+edition = "2021"
+authors = ["nuck"]
+description = "Custom workspace display for XFCE4 panel with configurable labels and icons (emoji, fontawesome, nerd font)"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "richspace"
+# staticlib for GCC final link (cdylib symbols get hidden by rustc)
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# GTK3 bindings
+gtk = { version = "0.18", features = ["v3_24"] }
+glib = "0.18"
+gdk = "0.18"
+pango = "0.18"
+cairo-rs = "0.18"
+
+# Low-level GTK sys crates for FFI
+gtk-sys = "0.18"
+glib-sys = "0.18"
+gobject-sys = "0.18"
+gdk-sys = "0.18"
+
+# libwnck bindings (shared crate)
+wnck-rs = { path = "../wnck-rs" }
+
+# File watching for live config reload
+notify = "6"
+
+# FFI utilities
+libc = "0.2"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Serialization (JSON state)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Directories
+dirs = "5"
+
+# Logging - tracing ecosystem for structured, async-safe logging
+# Sink: journald (view with: journalctl -t richspace)
+# Level: RUST_LOG env var (default: info), e.g. RUST_LOG=richspace=debug
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-journald = "0.3"
+
+[build-dependencies]
+pkg-config = "0.3"
+cc = "1"
+
+[profile.release]
+# LTO strips unreferenced C symbols - must disable for plugin to load
+lto = false
+strip = false

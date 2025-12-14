@@ -1,0 +1,10 @@
+[Xfce Panel]
+Type=X-XFCE-PanelPlugin
+Encoding=UTF-8
+Name=Rich Workspaces
+Comment=Custom workspace display with configurable labels and icons (emoji, fontawesome, nerd font)
+Icon=preferences-desktop-workspaces
+X-XFCE-Module=richspace
+X-XFCE-Internal=FALSE
+X-XFCE-Unique=false
+X-XFCE-API=2.0

@@ -1,0 +1,338 @@
+//! Workspace panel widget
+//!
+//! Displays workspace buttons with configurable icons/labels.
+//! Supports emoji, FontAwesome, Nerd Fonts, or any Unicode text.
+
+use gtk::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::app::{AppEvent, AppState};
+
+/// Main workspace widget
+pub struct WorkspaceWidget {
+    /// Outer container
+    container: gtk::Box,
+    /// Workspace buttons (recreated on workspace changes)
+    buttons: Rc<RefCell<Vec<gtk::Button>>>,
+    /// Event sender for click handling
+    tx: glib::Sender<AppEvent>,
+    /// CSS provider for dynamic styles
+    css_provider: gtk::CssProvider,
+}
+
+impl WorkspaceWidget {
+    /// Create a new workspace widget
+    pub fn new(state: &AppState, tx: glib::Sender<AppEvent>) -> Self {
+        let container = gtk::Box::new(state.orientation, state.config.spacing);
+        container.style_context().add_class("richspace");
+
+        let css_provider = gtk::CssProvider::new();
+
+        let widget = WorkspaceWidget {
+            container: container.clone(),
+            buttons: Rc::new(RefCell::new(Vec::new())),
+            tx,
+            css_provider,
+        };
+
+        // Apply default CSS with state for dynamic typography
+        widget.apply_default_css(state);
+
+        // Initial render
+        widget.render(state);
+
+        widget
+    }
+
+    /// Get the container widget
+    pub fn container(&self) -> &gtk::Box {
+        &self.container
+    }
+
+    /// Set orientation
+    pub fn set_orientation(&self, orientation: gtk::Orientation) {
+        self.container.set_orientation(orientation);
+    }
+
+    /// Apply default CSS styles (dynamically generated from config)
+    ///
+    /// Generates CSS based on:
+    /// - button_padding: dynamic padding from config
+    /// - font_family, font_size, font_weight: typography settings
+    /// - custom_css: appended last to allow user overrides
+    fn apply_default_css(&self, state: &AppState) {
+        // Build dynamic CSS based on config
+        let mut css = String::from(r#"
+        .richspace {
+            padding: 0;
+            margin: 0;
+        }
+
+        .richspace-button {
+"#);
+
+        // Dynamic button padding from config
+        css.push_str(&format!("            padding: {}px {}px;\n",
+            state.config.button_padding,
+            state.config.button_padding + 4));
+
+        css.push_str(r#"            margin: 0;
+            border-radius: 3px;
+            min-width: 0;
+            min-height: 0;
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
+
+        .richspace-button:hover {
+            background: alpha(@theme_fg_color, 0.1);
+        }
+
+        .richspace-button.active {
+            background: alpha(@theme_selected_bg_color, 0.3);
+        }
+
+        .richspace-button.has-windows::after {
+            content: "";
+        }
+
+        .richspace-button.empty {
+            opacity: 0.6;
+        }
+
+        .richspace-icon {
+"#);
+
+        // Typography for icon
+        Self::append_typography_css(&mut css, state);
+        css.push_str("        }\n\n");
+
+        css.push_str("        .richspace-label {\n");
+        // Typography for label
+        Self::append_typography_css(&mut css, state);
+        css.push_str("        }\n\n");
+
+        css.push_str(r#"        .richspace-label.active {
+            font-weight: bold;
+        }
+"#);
+
+        // Custom CSS from config (appended last to allow overrides)
+        if let Some(ref custom) = state.config.custom_css {
+            css.push_str("\n        /* Custom CSS */\n");
+            css.push_str(custom);
+            css.push('\n');
+        }
+
+        if let Err(e) = self.css_provider.load_from_data(css.as_bytes()) {
+            eprintln!("richspace: CSS error: {}", e);
+            return;
+        }
+
+        gtk::StyleContext::add_provider_for_screen(
+            &gdk::Screen::default().unwrap(),
+            &self.css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    /// Append typography CSS properties based on config
+    ///
+    /// Applies font_family, font_size, and font_weight if configured.
+    /// If not set, GTK uses system defaults.
+    fn append_typography_css(css: &mut String, state: &AppState) {
+        if let Some(ref family) = state.config.font_family {
+            css.push_str(&format!("            font-family: \"{}\";\n", family));
+        }
+
+        if let Some(size) = state.config.font_size {
+            css.push_str(&format!("            font-size: {}pt;\n", size));
+        }
+
+        if let Some(ref weight) = state.config.font_weight {
+            css.push_str(&format!("            font-weight: {};\n", weight));
+        }
+    }
+
+    /// Render workspace buttons based on current state
+    ///
+    /// Refreshes CSS (in case config changed) and rebuilds all workspace buttons.
+    pub fn render(&self, state: &AppState) {
+        // Refresh CSS (supports live config reload for typography/padding)
+        self.apply_default_css(state);
+
+        // Clear existing buttons
+        for child in self.container.children() {
+            self.container.remove(&child);
+        }
+        self.buttons.borrow_mut().clear();
+
+        // Create buttons for each workspace
+        for ws in &state.workspaces {
+            let button = self.create_workspace_button(ws, state);
+            self.container.pack_start(&button, false, false, 0);
+            self.buttons.borrow_mut().push(button);
+        }
+
+        self.container.show_all();
+    }
+
+    /// Create a button for a workspace
+    ///
+    /// Builds button content based on DisplayMode:
+    /// - IconOnly: shows icon only
+    /// - LabelOnly: shows label only
+    /// - IconAndLabel: shows both (icon + label side by side)
+    fn create_workspace_button(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> gtk::Button {
+        let button = gtk::Button::new();
+        button.style_context().add_class("richspace-button");
+
+        // CSS classes for state
+        if ws.is_active {
+            button.style_context().add_class("active");
+        }
+        if ws.window_count > 0 {
+            button.style_context().add_class("has-windows");
+        } else {
+            button.style_context().add_class("empty");
+        }
+
+        // Get display components
+        let (icon, label_text) = self.get_workspace_display(ws, state);
+
+        // Build button content
+        let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+
+        if let Some(icon_str) = icon {
+            let icon_label = gtk::Label::new(Some(&icon_str));
+            icon_label.style_context().add_class("richspace-icon");
+            icon_label.set_use_markup(true);
+            content_box.pack_start(&icon_label, false, false, 0);
+        }
+
+        if let Some(label_str) = label_text {
+            let label = gtk::Label::new(Some(&label_str));
+            label.style_context().add_class("richspace-label");
+            if ws.is_active {
+                label.style_context().add_class("active");
+            }
+            label.set_use_markup(true);
+            content_box.pack_start(&label, false, false, 0);
+        }
+
+        button.add(&content_box);
+
+        // Tooltip
+        let tooltip = self.get_workspace_tooltip(ws, state);
+        button.set_tooltip_text(Some(&tooltip));
+
+        // Click handler
+        let tx = self.tx.clone();
+        let ws_num = ws.number;
+        button.connect_clicked(move |_| {
+            tx.send(AppEvent::WorkspaceClicked(ws_num)).ok();
+        });
+
+        button
+    }
+
+    /// Get the display icon for a workspace
+    ///
+    /// Returns workspace icon based on:
+    /// 1. Ephemeral state (if set via richspace-ctl set-icon)
+    /// 2. Empty workspace icon (if no windows and empty_icon is set)
+    /// 3. Active vs default icon from config
+    fn get_workspace_icon(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> Option<String> {
+        // Check ephemeral state first
+        if let Some(ws_state) = state.state.get(ws.number) {
+            if let Some(ref icon) = ws_state.icon {
+                return Some(icon.clone());
+            }
+        }
+
+        // Empty workspace icon
+        if ws.window_count == 0 {
+            if let Some(ref empty_icon) = state.config.empty_icon {
+                return Some(empty_icon.clone());
+            }
+        }
+
+        // Active vs default icon
+        if ws.is_active {
+            Some(state.config.active_icon.clone().unwrap_or_else(|| state.config.default_icon.clone()))
+        } else {
+            Some(state.config.default_icon.clone())
+        }
+    }
+
+    /// Get the display components for a workspace
+    ///
+    /// Returns (icon, label) - either can be None based on DisplayMode and LabelSource.
+    /// Respects display_mode, label_source, and active_only_label config settings.
+    fn get_workspace_display(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> (Option<String>, Option<String>) {
+        use crate::config::{DisplayMode, LabelSource};
+
+        // Get icon
+        let icon = self.get_workspace_icon(ws, state);
+
+        // Get label text based on LabelSource
+        let label = match state.config.label_source {
+            LabelSource::Number => Some(format!("{}", ws.number + 1)),
+            LabelSource::WmName => {
+                if ws.name.is_empty() {
+                    Some(format!("{}", ws.number + 1))  // Fallback
+                } else {
+                    Some(ws.name.clone())
+                }
+            }
+            LabelSource::Custom => {
+                // Only from state file
+                state.state.get(ws.number)
+                    .and_then(|s| s.label.clone())
+                    .or_else(|| Some(format!("{}", ws.number + 1)))  // Fallback
+            }
+        };
+
+        // Apply active_only_label: non-active workspaces get no label
+        let label = if state.config.active_only_label && !ws.is_active {
+            None
+        } else {
+            label
+        };
+
+        // Filter based on display mode
+        match state.config.display_mode {
+            DisplayMode::IconOnly => (icon, None),
+            DisplayMode::LabelOnly => (None, label),
+            DisplayMode::IconAndLabel => (icon, label),
+        }
+    }
+
+    /// Get the tooltip for a workspace
+    fn get_workspace_tooltip(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> String {
+        // Check ephemeral state first
+        if let Some(ws_state) = state.state.get(ws.number) {
+            if let Some(ref tooltip) = ws_state.tooltip {
+                return tooltip.clone();
+            }
+        }
+
+        // Use workspace name if enabled
+        if state.config.show_name_tooltips && !ws.name.is_empty() {
+            let mut tooltip = ws.name.clone();
+            if state.config.show_window_count {
+                tooltip.push_str(&format!(" ({} windows)", ws.window_count));
+            }
+            return tooltip;
+        }
+
+        // Default tooltip
+        let mut tooltip = format!("Workspace {}", ws.number + 1);
+        if state.config.show_window_count {
+            tooltip.push_str(&format!(" ({} windows)", ws.window_count));
+        }
+        tooltip
+    }
+}
