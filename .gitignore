@@ -1,0 +1,29 @@
+# Rust build artifacts
+target/
+
+# Cargo.lock should be ignored for libraries/plugins (not applications)
+# Rationale: Panel plugins are consumed as shared libraries, not standalone binaries.
+# End users (the panel) will use their own dependency resolution.
+Cargo.lock
+
+# Shared object build outputs
+*.so
+*.a
+*.d
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local development / testing
+*.log
+*.tmp
+/tmp/
+
+# Backup files
+*.bak
+*.orig

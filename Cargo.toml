@@ -26,7 +26,7 @@ gobject-sys = "0.18"
 gdk-sys = "0.18"
 
 # libwnck bindings (shared crate)
-wnck-rs = { path = "../wnck-rs" }
+wnck-rs = { path = "../../Lib/wnck-rs" }
 
 # File watching for live config reload
 notify = "6"
@@ -38,19 +38,26 @@ libc = "0.2"
 thiserror = "1"
 anyhow = "1"
 
-# Serialization (JSON state)
+# Serialization (JSON state, TOML logging config)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 # Directories
 dirs = "5"
 
+# Signal handling for hot-reload
+signal-hook = "0.3"
+
 # Logging - tracing ecosystem for structured, async-safe logging
 # Sink: journald (view with: journalctl -t richspace)
-# Level: RUST_LOG env var (default: info), e.g. RUST_LOG=richspace=debug
+# Level: Centralized ~/Workspace/logging.toml, hot-reloaded on SIGHUP
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-journald = "0.3"
+
+# Spaceship shared logging infrastructure
+spaceship-std = { version = "0.1", path = "../../Lib/spaceship-std" }
 
 [build-dependencies]
 pkg-config = "0.3"
