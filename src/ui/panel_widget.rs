@@ -336,75 +336,18 @@ impl WorkspaceWidget {
         self.buttons.borrow_mut().clear();
 
         // Create buttons for each workspace
-        // Provider dots are added BESIDE the button (not replacing it)
+        // Provider dots are drawn INSIDE the button (integrated, not beside)
         for ws in &state.workspaces {
-            // Always create the workspace button
-            let button = self.create_workspace_button(ws, state);
+            // Get provider render state if available
+            let render_state = state.providers.get_render_state(ws.number).cloned();
 
-            // Check if workspace has provider data to display
-            if let Some(render_state) = state.providers.get_render_state(ws.number) {
-                // Create an HBox to hold button + provider dots side by side
-                let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                hbox.pack_start(&button, false, false, 0);
-
-                // Add provider dots to the right of the button
-                let provider_area = self.create_provider_area(ws, state, render_state);
-                hbox.pack_start(&provider_area, false, false, 0);
-
-                self.container.pack_start(&hbox, false, false, 0);
-            } else {
-                // No provider - just the button
-                self.container.pack_start(&button, false, false, 0);
-            }
-
+            // Create workspace button with optional provider dots inside
+            let button = self.create_workspace_button(ws, state, render_state.as_ref());
+            self.container.pack_start(&button, false, false, 0);
             self.buttons.borrow_mut().push(button);
         }
 
         self.container.show_all();
-    }
-
-    /// Create a DrawingArea for provider dots (beside the workspace button)
-    ///
-    /// Uses cairo to render provider's RenderState (dots with pulse glow)
-    fn create_provider_area(
-        &self,
-        _ws: &crate::wnck::WorkspaceInfo,
-        state: &AppState,
-        render_state: &RenderState,
-    ) -> gtk::DrawingArea {
-        let drawing_area = gtk::DrawingArea::new();
-
-        // Size based on number of dots + some padding
-        // Each dot takes ~12px, add padding for glow
-        let dot_count = render_state.dots.len().max(1);
-        let width = (dot_count as i32 * 14) + 4;
-        let height = state.size.max(24);
-        drawing_area.set_size_request(width, height);
-
-        // Extract tooltip before moving render_state into closure
-        let tooltip = render_state.tooltip.clone();
-
-        // Clone render_state for the draw closure
-        let render_state = render_state.clone();
-
-        drawing_area.connect_draw(move |widget, ctx| {
-            let width = widget.allocated_width() as f64;
-            let height = widget.allocated_height() as f64;
-
-            // Transparent background - dots only
-            // Draw provider's render state
-            render_state.draw(ctx, width, height);
-
-            glib::Propagation::Proceed
-        });
-
-        // Tooltip shows provider info
-        if let Some(ref tooltip) = tooltip {
-            drawing_area.set_tooltip_text(Some(tooltip));
-        }
-
-        self.add_css_to_widget(&drawing_area);
-        drawing_area
     }
 
     /// Create a button for a workspace
@@ -413,7 +356,15 @@ impl WorkspaceWidget {
     /// - IconOnly: shows icon only
     /// - LabelOnly: shows label only
     /// - IconAndLabel: shows both (icon + label side by side)
-    fn create_workspace_button(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> gtk::Button {
+    ///
+    /// If render_state is provided (provider claims this workspace), provider dots
+    /// are drawn inside the button after the label/icon.
+    fn create_workspace_button(
+        &self,
+        ws: &crate::wnck::WorkspaceInfo,
+        state: &AppState,
+        render_state: Option<&RenderState>,
+    ) -> gtk::Button {
         let button = gtk::Button::new();
         self.add_css_to_widget(&button);
         button.style_context().add_class("richspace-button");
@@ -483,6 +434,53 @@ impl WorkspaceWidget {
                     content_box.pack_end(&count, false, false, 2);
                 }
                 _ => {} // Hidden or Tooltip - no visual in button
+            }
+        }
+
+        // Provider dots (if provider claims this workspace)
+        // Drawn as small circles matching the window indicator style
+        if let Some(render_state) = render_state {
+            let dot_count = render_state.dots.len();
+            if dot_count > 0 {
+                let drawing_area = gtk::DrawingArea::new();
+                // Each dot ~8px wide + 2px spacing
+                let width = (dot_count as i32 * 10).max(12);
+                let height = state.size.max(16);
+                drawing_area.set_size_request(width, height);
+
+                let render_state = render_state.clone();
+                drawing_area.connect_draw(move |widget, ctx| {
+                    let width = widget.allocated_width() as f64;
+                    let height = widget.allocated_height() as f64;
+
+                    // Draw dots - small filled circles like window indicators
+                    let dot_radius = 3.0;
+                    let spacing = 10.0;
+                    let total_width = render_state.dots.len() as f64 * spacing;
+                    let start_x = (width - total_width) / 2.0 + spacing / 2.0;
+                    let center_y = height / 2.0;
+
+                    for (i, dot) in render_state.dots.iter().enumerate() {
+                        let x = start_x + i as f64 * spacing;
+
+                        // Pulse glow effect (outer ring)
+                        if dot.pulse > 0.01 {
+                            let glow_radius = dot_radius + dot.pulse as f64 * 3.0;
+                            ctx.set_source_rgba(dot.r, dot.g, dot.b, dot.pulse as f64 * 0.4);
+                            ctx.arc(x, center_y, glow_radius, 0.0, std::f64::consts::TAU);
+                            ctx.fill().ok();
+                        }
+
+                        // Main dot (filled circle)
+                        ctx.set_source_rgb(dot.r, dot.g, dot.b);
+                        ctx.arc(x, center_y, dot_radius, 0.0, std::f64::consts::TAU);
+                        ctx.fill().ok();
+                    }
+
+                    glib::Propagation::Proceed
+                });
+
+                content_box.pack_end(&drawing_area, false, false, 2);
             }
         }
 
