@@ -136,6 +136,13 @@ impl ProviderRegistry {
         self.claims.contains_key(&workspace)
     }
 
+    /// Check if any provider is animating (needs 60fps tick)
+    pub fn any_animating(&self) -> bool {
+        self.providers.values().any(|p| {
+            p.render_states.values().any(|s| s.animating)
+        })
+    }
+
     /// Handle provider event
     pub fn handle_event(&mut self, event: ProviderEvent) {
         match event {

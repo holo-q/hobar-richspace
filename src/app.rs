@@ -72,10 +72,11 @@ pub struct App {
     plugin: XfcePanelPlugin,
     app_state: Rc<RefCell<AppState>>,
     widget: WorkspaceWidget,
-    #[allow(dead_code)]
     tx: glib::Sender<AppEvent>,
     /// File watcher for state live reload (kept alive)
     _watcher: Option<RecommendedWatcher>,
+    /// Animation tick source (60fps when providers are animating)
+    animation_source: Option<glib::SourceId>,
 }
 
 impl App {
@@ -141,6 +142,7 @@ impl App {
             widget,
             tx: tx.clone(),
             _watcher: watcher,
+            animation_source: None,
         }));
 
         // Connect wnck signals
@@ -324,11 +326,17 @@ impl App {
                 self.app_state.borrow_mut().providers.handle_event(event);
                 // Re-render to show provider state
                 self.widget.render(&self.app_state.borrow());
+                // Start/stop animation tick based on provider state
+                self.update_animation_tick();
             }
             AppEvent::AnimationTick => {
                 // Called every 16ms when providers are animating
                 // Just re-render - providers handle their own animation state
                 self.widget.render(&self.app_state.borrow());
+                // Check if we should stop (no longer animating)
+                if !self.app_state.borrow().providers.any_animating() {
+                    self.stop_animation_tick();
+                }
             }
             AppEvent::OrientationChanged(orientation) => {
                 self.app_state.borrow_mut().orientation = orientation;
@@ -423,6 +431,36 @@ impl App {
 
     /// Cleanup before exit
     fn cleanup(&mut self) {
+        self.stop_animation_tick();
         self.save_config();
+    }
+
+    /// Start/stop animation tick based on provider state
+    ///
+    /// Called after provider updates to ensure 60fps rendering when needed.
+    /// 16ms interval = 60fps for smooth pulse animations.
+    fn update_animation_tick(&mut self) {
+        let needs_animation = self.app_state.borrow().providers.any_animating();
+
+        if needs_animation && self.animation_source.is_none() {
+            // Start animation tick (16ms = 60fps)
+            let tx = self.tx.clone();
+            let source = glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+                tx.send(AppEvent::AnimationTick).ok();
+                glib::ControlFlow::Continue
+            });
+            self.animation_source = Some(source);
+            tracing::debug!("animation tick started");
+        } else if !needs_animation && self.animation_source.is_some() {
+            self.stop_animation_tick();
+        }
+    }
+
+    /// Stop the animation tick if running
+    fn stop_animation_tick(&mut self) {
+        if let Some(source) = self.animation_source.take() {
+            source.remove();
+            tracing::debug!("animation tick stopped");
+        }
     }
 }
