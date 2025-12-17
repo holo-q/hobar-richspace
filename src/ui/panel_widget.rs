@@ -335,86 +335,76 @@ impl WorkspaceWidget {
         }
         self.buttons.borrow_mut().clear();
 
-        // Create buttons/drawing areas for each workspace
+        // Create buttons for each workspace
+        // Provider dots are added BESIDE the button (not replacing it)
         for ws in &state.workspaces {
-            // Check if workspace is claimed by a provider
+            // Always create the workspace button
+            let button = self.create_workspace_button(ws, state);
+
+            // Check if workspace has provider data to display
             if let Some(render_state) = state.providers.get_render_state(ws.number) {
-                // Provider-claimed: use DrawingArea with cairo rendering
-                let widget = self.create_provider_widget(ws, state, render_state);
-                self.container.pack_start(&widget, false, false, 0);
+                // Create an HBox to hold button + provider dots side by side
+                let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                hbox.pack_start(&button, false, false, 0);
+
+                // Add provider dots to the right of the button
+                let provider_area = self.create_provider_area(ws, state, render_state);
+                hbox.pack_start(&provider_area, false, false, 0);
+
+                self.container.pack_start(&hbox, false, false, 0);
             } else {
-                // Default: use GTK button
-                let button = self.create_workspace_button(ws, state);
+                // No provider - just the button
                 self.container.pack_start(&button, false, false, 0);
-                self.buttons.borrow_mut().push(button);
             }
+
+            self.buttons.borrow_mut().push(button);
         }
 
         self.container.show_all();
     }
 
-    /// Create a DrawingArea for provider-claimed workspace
+    /// Create a DrawingArea for provider dots (beside the workspace button)
     ///
-    /// Uses cairo to render provider's RenderState (dots, pulses, etc.)
-    fn create_provider_widget(
+    /// Uses cairo to render provider's RenderState (dots with pulse glow)
+    fn create_provider_area(
         &self,
-        ws: &crate::wnck::WorkspaceInfo,
+        _ws: &crate::wnck::WorkspaceInfo,
         state: &AppState,
         render_state: &RenderState,
-    ) -> gtk::EventBox {
-        // Wrap DrawingArea in EventBox for click handling
-        let event_box = gtk::EventBox::new();
+    ) -> gtk::DrawingArea {
         let drawing_area = gtk::DrawingArea::new();
 
-        // Request size similar to button (use config padding)
-        let size = state.size.max(24);
-        drawing_area.set_size_request(size, size);
+        // Size based on number of dots + some padding
+        // Each dot takes ~12px, add padding for glow
+        let dot_count = render_state.dots.len().max(1);
+        let width = (dot_count as i32 * 14) + 4;
+        let height = state.size.max(24);
+        drawing_area.set_size_request(width, height);
 
         // Extract tooltip before moving render_state into closure
-        let tooltip = render_state.tooltip.clone()
-            .unwrap_or_else(|| format!("Workspace {}", ws.number + 1));
+        let tooltip = render_state.tooltip.clone();
 
         // Clone render_state for the draw closure
         let render_state = render_state.clone();
-        let is_active = ws.is_active;
 
         drawing_area.connect_draw(move |widget, ctx| {
             let width = widget.allocated_width() as f64;
             let height = widget.allocated_height() as f64;
 
-            // Background (slightly different for active workspace)
-            if is_active {
-                ctx.set_source_rgba(0.3, 0.3, 0.35, 0.8);
-            } else {
-                ctx.set_source_rgba(0.2, 0.2, 0.22, 0.6);
-            }
-            ctx.rectangle(0.0, 0.0, width, height);
-            ctx.fill().ok();
-
+            // Transparent background - dots only
             // Draw provider's render state
             render_state.draw(ctx, width, height);
 
             glib::Propagation::Proceed
         });
 
-        // Click handler - switch to workspace
-        let tx = self.tx.clone();
-        let ws_num = ws.number;
-        event_box.connect_button_press_event(move |_, event| {
-            if event.button() == 1 {
-                // Left-click: switch to workspace
-                tx.send(AppEvent::WorkspaceClicked(ws_num)).ok();
-            }
-            glib::Propagation::Proceed
-        });
+        // Tooltip shows provider info
+        if let Some(ref tooltip) = tooltip {
+            drawing_area.set_tooltip_text(Some(tooltip));
+        }
 
-        // Set tooltip
-        event_box.set_tooltip_text(Some(&tooltip));
-
-        event_box.add(&drawing_area);
-        self.add_css_to_widget(&event_box);
-
-        event_box
+        self.add_css_to_widget(&drawing_area);
+        drawing_area
     }
 
     /// Create a button for a workspace
