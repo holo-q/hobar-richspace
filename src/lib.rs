@@ -12,6 +12,7 @@ mod config;
 mod state;
 mod app;
 mod ui;
+mod providers;
 
 use xfce::{XfcePanelPluginPointer, XfcePanelPlugin};
 

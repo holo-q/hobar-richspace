@@ -1,7 +1,7 @@
 //! Application state machine
 //!
 //! Elm-inspired architecture with centralized state and message passing.
-//! Handles workspace changes, state file watching, and UI updates.
+//! Handles workspace changes, state file watching, provider IPC, and UI updates.
 
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::state::State;
 use crate::wnck::{self, WorkspaceInfo};
 use crate::ui::WorkspaceWidget;
+use crate::providers::{self, ProviderEvent, ProviderRegistry};
 
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc::channel;
@@ -28,6 +29,10 @@ pub enum AppEvent {
     WindowsChanged,
     /// State file changed (live reload)
     StateFileChanged,
+    /// Provider IPC event (render update, connection, etc.)
+    ProviderUpdate(ProviderEvent),
+    /// Animation tick (16ms for 60fps when providers are animating)
+    AnimationTick,
     /// Panel orientation changed
     OrientationChanged(gtk::Orientation),
     /// Panel size changed
@@ -58,6 +63,8 @@ pub struct AppState {
     pub workspaces: Vec<WorkspaceInfo>,
     pub orientation: gtk::Orientation,
     pub size: i32,
+    /// Provider registry - tracks connected providers and their render states
+    pub providers: ProviderRegistry,
 }
 
 /// Main application
@@ -95,6 +102,7 @@ impl App {
             workspaces,
             orientation: plugin.orientation(),
             size: plugin.size(),
+            providers: ProviderRegistry::new(),
         }));
 
         // Create message channel
@@ -110,6 +118,21 @@ impl App {
 
         // Set up file watcher for state live reload
         let watcher = Self::setup_state_watcher(tx.clone());
+
+        // Start provider IPC listener (separate channel to wrap ProviderEvent in AppEvent)
+        {
+            let tx = tx.clone();
+            let (provider_tx, provider_rx) = glib::MainContext::channel::<ProviderEvent>(glib::Priority::DEFAULT);
+
+            // Bridge provider events to main event loop
+            provider_rx.attach(None, move |event| {
+                tx.send(AppEvent::ProviderUpdate(event)).ok();
+                glib::ControlFlow::Continue
+            });
+
+            // Start the listener (runs in background thread with tokio)
+            providers::start_listener(provider_tx);
+        }
 
         // Create app
         let app = Rc::new(RefCell::new(App {
@@ -295,6 +318,17 @@ impl App {
                     self.widget.render(&self.app_state.borrow());
                     tracing::info!("state reloaded from file");
                 }
+            }
+            AppEvent::ProviderUpdate(event) => {
+                // Update provider registry
+                self.app_state.borrow_mut().providers.handle_event(event);
+                // Re-render to show provider state
+                self.widget.render(&self.app_state.borrow());
+            }
+            AppEvent::AnimationTick => {
+                // Called every 16ms when providers are animating
+                // Just re-render - providers handle their own animation state
+                self.widget.render(&self.app_state.borrow());
             }
             AppEvent::OrientationChanged(orientation) => {
                 self.app_state.borrow_mut().orientation = orientation;

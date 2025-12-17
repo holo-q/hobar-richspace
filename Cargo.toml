@@ -31,6 +31,9 @@ wnck-rs = { path = "../../Lib/wnck-rs" }
 # File watching for live config reload
 notify = "6"
 
+# Async runtime for provider IPC (unix socket listener)
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "fs"] }
+
 # FFI utilities
 libc = "0.2"
 
