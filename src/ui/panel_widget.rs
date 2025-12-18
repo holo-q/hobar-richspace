@@ -612,6 +612,7 @@ impl WorkspaceWidget {
         }
 
         // Evaluate icon rules (first match wins)
+        // Rules can reference macros (predefined class patterns) or raw regex
         if !ws.window_classes.is_empty() && !state.config.icon_rules.is_empty() {
             tracing::debug!(
                 workspace = ws.number,
@@ -620,7 +621,7 @@ impl WorkspaceWidget {
                 "Evaluating icon rules"
             );
             for rule in &state.config.icon_rules {
-                if rule.matches(&ws.window_classes) {
+                if rule.matches(&ws.window_classes, &state.config.macros) {
                     tracing::info!(
                         workspace = ws.number,
                         rule = ?rule.name,

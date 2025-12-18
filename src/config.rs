@@ -2,9 +2,22 @@
 //!
 //! Stores plugin settings like default icons, styling preferences.
 //! This is PERSISTENT across sessions (stored in ~/.config/xfce4/panel/).
+//!
+//! Config format is TOML with macro support for icon rules:
+//! ```toml
+//! [macros]
+//! browser = ["firefox", "brave-browser", "chromium"]
+//! fm = ["nemo", "nautilus", "thunar"]
+//!
+//! [[icon_rules]]
+//! macro = "browser"  # References macros.browser
+//! icon = "󰖟"
+//! match_mode = "all"
+//! ```
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use anyhow::Result;
 
@@ -62,18 +75,33 @@ pub enum IconMatchMode {
 /// Evaluated in order on each window change. First matching rule wins.
 /// Uses WM_CLASS (class_group) for matching - e.g., "firefox", "kitty", "Code".
 ///
-/// # Example
-/// ```json
-/// {
-///   "class_regex": "^(firefox|chromium|qutebrowser)$",
-///   "icon": "󰖟",
-///   "match_mode": "all"
-/// }
+/// Rules can use either:
+/// - `macro`: reference a predefined class list from [macros] section
+/// - `class_regex`: raw regex pattern for custom matching
+///
+/// # Example (TOML)
+/// ```toml
+/// [[icon_rules]]
+/// macro = "browser"      # Uses predefined macro
+/// icon = "󰖟"
+/// match_mode = "all"
+///
+/// [[icon_rules]]
+/// class_regex = "^code$" # Raw regex
+/// icon = "󰨞"
+/// match_mode = "any"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IconRule {
+    /// Reference to a macro name (from [macros] section)
+    /// Expands to regex: ^(class1|class2|...)$
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#macro: Option<String>,
+
     /// Regex pattern to match against WM_CLASS (case-insensitive)
-    pub class_regex: String,
+    /// Used if `macro` is not set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_regex: Option<String>,
 
     /// Icon to display when rule matches (emoji, nerd font glyph, text)
     pub icon: String,
@@ -88,11 +116,36 @@ pub struct IconRule {
 }
 
 impl IconRule {
-    /// Compile the regex pattern (case-insensitive)
-    pub fn compile_regex(&self) -> Option<Regex> {
-        regex::RegexBuilder::new(&self.class_regex)
+    /// Build the effective regex pattern, expanding macros if needed
+    fn effective_pattern(&self, macros: &HashMap<String, Vec<String>>) -> Option<String> {
+        if let Some(ref macro_name) = self.r#macro {
+            // Expand macro to regex: ^(class1|class2|...)$
+            if let Some(classes) = macros.get(macro_name) {
+                if classes.is_empty() {
+                    tracing::warn!(macro_name, "Empty macro referenced in icon rule");
+                    return None;
+                }
+                // Escape regex special chars in class names, join with |
+                let escaped: Vec<String> = classes.iter()
+                    .map(|c| regex::escape(c))
+                    .collect();
+                Some(format!("^({})$", escaped.join("|")))
+            } else {
+                tracing::warn!(macro_name, "Unknown macro referenced in icon rule");
+                None
+            }
+        } else {
+            self.class_regex.clone()
+        }
+    }
+
+    /// Compile the regex pattern (case-insensitive), expanding macros
+    pub fn compile_regex(&self, macros: &HashMap<String, Vec<String>>) -> Option<Regex> {
+        let pattern = self.effective_pattern(macros)?;
+        regex::RegexBuilder::new(&pattern)
             .case_insensitive(true)
             .build()
+            .map_err(|e| tracing::warn!(pattern, error = %e, "Invalid icon rule regex"))
             .ok()
     }
 
@@ -101,13 +154,12 @@ impl IconRule {
     /// Returns true if the rule matches based on match_mode:
     /// - All: every class must match the pattern
     /// - Any: at least one class must match
-    pub fn matches(&self, classes: &[String]) -> bool {
+    pub fn matches(&self, classes: &[String], macros: &HashMap<String, Vec<String>>) -> bool {
         if classes.is_empty() {
             return false;
         }
 
-        let Some(regex) = self.compile_regex() else {
-            tracing::warn!(pattern = %self.class_regex, "Invalid icon rule regex");
+        let Some(regex) = self.compile_regex(macros) else {
             return false;
         };
 
@@ -120,10 +172,17 @@ impl IconRule {
 
 /// Persistent plugin configuration
 ///
-/// Stored in ~/.config/xfce4/panel/richspace-N.json
+/// Stored in ~/.config/xfce4/panel/richspace-N.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    // ─── Macros ────────────────────────────────────────────────────────────
+    /// Predefined class patterns for icon rules
+    /// Keys are macro names, values are lists of WM_CLASS strings
+    /// Referenced in icon_rules via `macro = "name"`
+    #[serde(default = "default_macros")]
+    pub macros: HashMap<String, Vec<String>>,
+
     // ─── Legacy Fields (kept for backward compatibility) ────────────────────
     /// Default icon/label for workspaces without custom state
     /// Can be emoji, nerd font icon, or text
@@ -234,9 +293,80 @@ fn default_button_padding() -> i32 {
     4
 }
 
+/// Default macros for common application categories
+fn default_macros() -> HashMap<String, Vec<String>> {
+    let mut m = HashMap::new();
+
+    // Web browsers
+    m.insert("browser".to_string(), vec![
+        "firefox".to_string(),
+        "brave-browser".to_string(),
+        "chromium".to_string(),
+        "google-chrome".to_string(),
+        "qutebrowser".to_string(),
+        "Navigator".to_string(),  // Firefox class
+        "Chromium-browser".to_string(),
+    ]);
+
+    // File managers
+    m.insert("fm".to_string(), vec![
+        "nemo".to_string(),
+        "nautilus".to_string(),
+        "thunar".to_string(),
+        "dolphin".to_string(),
+        "pcmanfm".to_string(),
+        "spacefm".to_string(),
+        "caja".to_string(),
+    ]);
+
+    // Terminals
+    m.insert("terminal".to_string(), vec![
+        "kitty".to_string(),
+        "alacritty".to_string(),
+        "gnome-terminal".to_string(),
+        "xterm".to_string(),
+        "konsole".to_string(),
+        "terminator".to_string(),
+        "tilix".to_string(),
+        "st".to_string(),
+    ]);
+
+    // Claude (AI assistant)
+    m.insert("claude".to_string(), vec![
+        "claude".to_string(),
+        "Claude".to_string(),
+    ]);
+
+    // Code editors
+    m.insert("editor".to_string(), vec![
+        "code".to_string(),
+        "Code".to_string(),
+        "vscodium".to_string(),
+        "sublime_text".to_string(),
+        "atom".to_string(),
+    ]);
+
+    // JetBrains IDEs
+    m.insert("jetbrains".to_string(), vec![
+        "jetbrains-idea".to_string(),
+        "jetbrains-pycharm".to_string(),
+        "jetbrains-webstorm".to_string(),
+        "jetbrains-clion".to_string(),
+        "jetbrains-goland".to_string(),
+        "jetbrains-rustrover".to_string(),
+        "jetbrains-rider".to_string(),
+        "jetbrains-datagrip".to_string(),
+    ]);
+
+    m
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
+            // Macros - predefined class patterns
+            macros: default_macros(),
+
             // Legacy fields - kept for backward compatibility
             default_icon: "○".to_string(),
             active_icon: Some("●".to_string()),
@@ -283,25 +413,82 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load config from JSON file
-    pub fn load(path: &PathBuf) -> Result<Self> {
-        if path.exists() {
-            let content = std::fs::read_to_string(path)?;
-            let config: Config = serde_json::from_str(&content)?;
-            Ok(config)
-        } else {
-            Ok(Config::default())
+    /// Merge user macros with defaults
+    ///
+    /// User-defined macros override defaults with the same name.
+    /// Default macros not overridden by user are preserved.
+    fn merge_macros(&mut self) {
+        let defaults = default_macros();
+        for (name, classes) in defaults {
+            // Only insert if user didn't define this macro
+            self.macros.entry(name).or_insert(classes);
         }
     }
 
-    /// Save config to JSON file
+    /// Load config from TOML file (with JSON fallback for migration)
+    ///
+    /// Tries .toml first, then falls back to .json for backward compatibility.
+    /// If JSON is loaded, it will be migrated to TOML on next save.
+    /// Default macros are merged with user-defined ones.
+    pub fn load(path: &PathBuf) -> Result<Self> {
+        // Try TOML first
+        let toml_path = path.with_extension("toml");
+        if toml_path.exists() {
+            let content = std::fs::read_to_string(&toml_path)?;
+            let mut config: Config = toml::from_str(&content)?;
+            config.merge_macros();
+            tracing::debug!(path = %toml_path.display(), "Loaded config from TOML");
+            return Ok(config);
+        }
+
+        // Fallback to JSON for backward compatibility
+        let json_path = path.with_extension("json");
+        if json_path.exists() {
+            let content = std::fs::read_to_string(&json_path)?;
+            let mut config: Config = serde_json::from_str(&content)?;
+            config.merge_macros();
+            tracing::info!(
+                json_path = %json_path.display(),
+                toml_path = %toml_path.display(),
+                "Loaded config from JSON (will migrate to TOML on save)"
+            );
+            return Ok(config);
+        }
+
+        // Also try the exact path (for edge cases)
+        if path.exists() {
+            let content = std::fs::read_to_string(path)?;
+            // Try TOML first, then JSON
+            if let Ok(mut config) = toml::from_str::<Config>(&content) {
+                config.merge_macros();
+                return Ok(config);
+            }
+            if let Ok(mut config) = serde_json::from_str::<Config>(&content) {
+                config.merge_macros();
+                return Ok(config);
+            }
+        }
+
+        Ok(Config::default())
+    }
+
+    /// Save config to TOML file
+    ///
+    /// Always saves as TOML (migrating from JSON if needed).
     pub fn save(&self, path: &PathBuf) -> Result<()> {
-        if let Some(parent) = path.parent() {
+        let toml_path = path.with_extension("toml");
+        if let Some(parent) = toml_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(&toml_path, content)?;
+        tracing::debug!(path = %toml_path.display(), "Saved config to TOML");
         Ok(())
+    }
+
+    /// Get the TOML config path from a base path
+    pub fn toml_path(base: &PathBuf) -> PathBuf {
+        base.with_extension("toml")
     }
 }
 
@@ -310,35 +497,111 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_icon_rule_parsing() {
-        let json = r#"[
-            {
-              "class_regex": "^(firefox|chromium)$",
-              "icon": "󰖟",
-              "match_mode": "all",
-              "name": "Web browsers only"
-            }
-        ]"#;
-        
-        let rules: Vec<IconRule> = serde_json::from_str(json).expect("should parse");
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].match_mode, IconMatchMode::All);
+    fn test_icon_rule_with_class_regex() {
+        let toml = r#"
+            [[icon_rules]]
+            class_regex = "^(firefox|chromium)$"
+            icon = "󰖟"
+            match_mode = "all"
+            name = "Web browsers"
+        "#;
+
+        #[derive(Deserialize)]
+        struct RulesWrapper { icon_rules: Vec<IconRule> }
+        let wrapper: RulesWrapper = toml::from_str(toml).expect("should parse");
+        assert_eq!(wrapper.icon_rules.len(), 1);
+        assert_eq!(wrapper.icon_rules[0].match_mode, IconMatchMode::All);
+        assert!(wrapper.icon_rules[0].class_regex.is_some());
     }
-    
+
     #[test]
-    fn test_config_with_icon_rules() {
-        let json = r#"{
-          "default_icon": "○",
-          "icon_rules": [
-            {
-              "class_regex": "^firefox$",
-              "icon": "󰖟",
-              "match_mode": "all"
-            }
-          ]
-        }"#;
-        
-        let config: Config = serde_json::from_str(json).expect("should parse");
+    fn test_icon_rule_with_macro() {
+        let toml = r#"
+            [[icon_rules]]
+            macro = "browser"
+            icon = "󰖟"
+            match_mode = "all"
+        "#;
+
+        #[derive(Deserialize)]
+        struct RulesWrapper { icon_rules: Vec<IconRule> }
+        let wrapper: RulesWrapper = toml::from_str(toml).expect("should parse");
+        assert_eq!(wrapper.icon_rules.len(), 1);
+        assert!(wrapper.icon_rules[0].r#macro.is_some());
+        assert_eq!(wrapper.icon_rules[0].r#macro.as_ref().unwrap(), "browser");
+    }
+
+    #[test]
+    fn test_macro_expansion() {
+        let mut macros = HashMap::new();
+        macros.insert("browser".to_string(), vec![
+            "firefox".to_string(),
+            "brave-browser".to_string(),
+        ]);
+
+        let rule = IconRule {
+            r#macro: Some("browser".to_string()),
+            class_regex: None,
+            icon: "󰖟".to_string(),
+            match_mode: IconMatchMode::All,
+            name: None,
+        };
+
+        // Should match when all windows are browsers
+        assert!(rule.matches(&["firefox".to_string()], &macros));
+        assert!(rule.matches(&["brave-browser".to_string()], &macros));
+        assert!(rule.matches(&["firefox".to_string(), "brave-browser".to_string()], &macros));
+
+        // Should NOT match when non-browser present (match_mode = all)
+        assert!(!rule.matches(&["firefox".to_string(), "kitty".to_string()], &macros));
+    }
+
+    #[test]
+    fn test_macro_expansion_any_mode() {
+        let mut macros = HashMap::new();
+        macros.insert("browser".to_string(), vec!["firefox".to_string()]);
+
+        let rule = IconRule {
+            r#macro: Some("browser".to_string()),
+            class_regex: None,
+            icon: "󰖟".to_string(),
+            match_mode: IconMatchMode::Any,
+            name: None,
+        };
+
+        // Should match when ANY window is a browser
+        assert!(rule.matches(&["firefox".to_string(), "kitty".to_string()], &macros));
+        assert!(!rule.matches(&["kitty".to_string()], &macros));
+    }
+
+    #[test]
+    fn test_config_toml_parsing() {
+        let toml = r#"
+            default_icon = "○"
+
+            [macros]
+            browser = ["firefox", "brave-browser"]
+
+            [[icon_rules]]
+            macro = "browser"
+            icon = "󰖟"
+            match_mode = "all"
+        "#;
+
+        let config: Config = toml::from_str(toml).expect("should parse");
         assert_eq!(config.icon_rules.len(), 1);
+        assert!(config.macros.contains_key("browser"));
+        assert_eq!(config.macros["browser"].len(), 2);
+    }
+
+    #[test]
+    fn test_default_macros_exist() {
+        let config = Config::default();
+        assert!(config.macros.contains_key("browser"));
+        assert!(config.macros.contains_key("fm"));
+        assert!(config.macros.contains_key("terminal"));
+        assert!(config.macros.contains_key("claude"));
+        assert!(config.macros.contains_key("editor"));
+        assert!(config.macros.contains_key("jetbrains"));
     }
 }
