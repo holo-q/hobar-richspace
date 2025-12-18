@@ -142,24 +142,31 @@ impl WorkspaceWidget {
             background: transparent;
             border: none;
             box-shadow: none;
+            /* Fade OUT only: transition on base state controls return animation */
+            transition: all 60ms ease;
         }
 
         .richspace-button:hover {
             background: rgba(255, 255, 255, 0.1);
+            /* No fade IN: instant snap to hover state */
+            transition: none;
         }
 
         /* Active workspace: subtle highlight */
         .richspace-button.active {
             background: alpha(@theme_selected_bg_color, 0.2);
+            transition: none;  /* Instant snap when becoming active */
         }
 
         .richspace-button.active:hover {
             background: alpha(@theme_selected_bg_color, 0.3);
+            transition: none;
         }
 
         /* Urgency - solid highlight (GTK CSS doesn't support @keyframes) */
         .richspace-button.urgent {
             background: alpha(#e74c3c, 0.3);
+            transition: none;
         }
 
         /* Icon styling - slightly dimmed by default */
@@ -584,12 +591,13 @@ impl WorkspaceWidget {
 
     /// Get the display icon for a workspace
     ///
-    /// Returns workspace icon based on:
+    /// Returns workspace icon based on (in priority order):
     /// 1. Ephemeral state (if set via richspace-ctl set-icon)
     /// 2. Empty workspace icon (if no windows and empty_icon is set)
-    /// 3. Active vs default icon from config
+    /// 3. Icon rules (first matching rule wins)
+    /// 4. Active vs default icon from config
     fn get_workspace_icon(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> Option<String> {
-        // Check ephemeral state first
+        // Check ephemeral state first (user explicitly set icon)
         if let Some(ws_state) = state.state.get(ws.number) {
             if let Some(ref icon) = ws_state.icon {
                 return Some(icon.clone());
@@ -601,6 +609,28 @@ impl WorkspaceWidget {
             if let Some(ref empty_icon) = state.config.empty_icon {
                 return Some(empty_icon.clone());
             }
+        }
+
+        // Evaluate icon rules (first match wins)
+        if !ws.window_classes.is_empty() && !state.config.icon_rules.is_empty() {
+            tracing::debug!(
+                workspace = ws.number,
+                classes = ?ws.window_classes,
+                rule_count = state.config.icon_rules.len(),
+                "Evaluating icon rules"
+            );
+            for rule in &state.config.icon_rules {
+                if rule.matches(&ws.window_classes) {
+                    tracing::info!(
+                        workspace = ws.number,
+                        rule = ?rule.name,
+                        icon = %rule.icon,
+                        "Icon rule matched"
+                    );
+                    return Some(rule.icon.clone());
+                }
+            }
+            tracing::debug!(workspace = ws.number, "No icon rule matched");
         }
 
         // Active vs default icon

@@ -20,6 +20,8 @@ pub struct WorkspaceInfo {
     pub is_active: bool,
     /// Number of windows on this workspace
     pub window_count: usize,
+    /// WM_CLASS names of windows on this workspace (for icon rules)
+    pub window_classes: Vec<String>,
 }
 
 /// Get information about all workspaces
@@ -51,8 +53,8 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
         .map(|ws| {
             let number = ws.get_number();
 
-            // Count windows on this workspace
-            let window_count = windows
+            // Get windows on this workspace (excluding skip_tasklist)
+            let ws_windows: Vec<_> = windows
                 .iter()
                 .filter(|w| {
                     w.get_workspace()
@@ -60,13 +62,20 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
                         .unwrap_or(false)
                         && !w.is_skip_tasklist()
                 })
-                .count();
+                .collect();
+
+            // Collect WM_CLASS names for icon rules
+            let window_classes: Vec<String> = ws_windows
+                .iter()
+                .filter_map(|w| w.get_class_group())
+                .collect();
 
             WorkspaceInfo {
                 number,
                 name: ws.get_name().unwrap_or_default(),
                 is_active: number == active_num,
-                window_count,
+                window_count: ws_windows.len(),
+                window_classes,
             }
         })
         .collect()

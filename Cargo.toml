@@ -61,6 +61,7 @@ tracing-journald = "0.3"
 
 # Spaceship shared logging infrastructure
 spaceship-std = { version = "0.1", path = "../../Lib/spaceship-std" }
+regex = "1.12.2"
 
 [build-dependencies]
 pkg-config = "0.3"

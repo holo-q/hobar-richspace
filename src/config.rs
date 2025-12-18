@@ -3,6 +3,7 @@
 //! Stores plugin settings like default icons, styling preferences.
 //! This is PERSISTENT across sessions (stored in ~/.config/xfce4/panel/).
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use anyhow::Result;
@@ -43,6 +44,78 @@ pub enum WindowCountDisplay {
     Badge,
     /// Show inline with label
     Inline,
+}
+
+/// How windows must match for an icon rule to trigger
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IconMatchMode {
+    /// ALL windows on workspace must match the pattern
+    #[default]
+    All,
+    /// ANY window on workspace matches (at least one)
+    Any,
+}
+
+/// Rule for automatically setting workspace icon based on window classes
+///
+/// Evaluated in order on each window change. First matching rule wins.
+/// Uses WM_CLASS (class_group) for matching - e.g., "firefox", "kitty", "Code".
+///
+/// # Example
+/// ```json
+/// {
+///   "class_regex": "^(firefox|chromium|qutebrowser)$",
+///   "icon": "󰖟",
+///   "match_mode": "all"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IconRule {
+    /// Regex pattern to match against WM_CLASS (case-insensitive)
+    pub class_regex: String,
+
+    /// Icon to display when rule matches (emoji, nerd font glyph, text)
+    pub icon: String,
+
+    /// How windows must match: "all" or "any"
+    #[serde(default)]
+    pub match_mode: IconMatchMode,
+
+    /// Optional human-readable name for this rule
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl IconRule {
+    /// Compile the regex pattern (case-insensitive)
+    pub fn compile_regex(&self) -> Option<Regex> {
+        regex::RegexBuilder::new(&self.class_regex)
+            .case_insensitive(true)
+            .build()
+            .ok()
+    }
+
+    /// Check if a set of window classes matches this rule
+    ///
+    /// Returns true if the rule matches based on match_mode:
+    /// - All: every class must match the pattern
+    /// - Any: at least one class must match
+    pub fn matches(&self, classes: &[String]) -> bool {
+        if classes.is_empty() {
+            return false;
+        }
+
+        let Some(regex) = self.compile_regex() else {
+            tracing::warn!(pattern = %self.class_regex, "Invalid icon rule regex");
+            return false;
+        };
+
+        match self.match_mode {
+            IconMatchMode::All => classes.iter().all(|c| regex.is_match(c)),
+            IconMatchMode::Any => classes.iter().any(|c| regex.is_match(c)),
+        }
+    }
 }
 
 /// Persistent plugin configuration
@@ -97,6 +170,14 @@ pub struct Config {
     /// Icon for workspaces with no windows (None = use default_icon)
     #[serde(default)]
     pub empty_icon: Option<String>,
+
+    // ─── Icon Rules ────────────────────────────────────────────────────────
+    /// Auto-icon rules based on window classes
+    ///
+    /// Evaluated in order on each window add/remove. First match wins.
+    /// If no rule matches, falls back to default_icon/active_icon.
+    #[serde(default)]
+    pub icon_rules: Vec<IconRule>,
 
     // ─── Window Count ───────────────────────────────────────────────────────
     /// How to display window count per workspace
@@ -175,6 +256,9 @@ impl Default for Config {
             // Icons
             empty_icon: Some("·".to_string()),
 
+            // Icon rules (empty by default - user configures)
+            icon_rules: Vec::new(),
+
             // Window count
             window_count_display: WindowCountDisplay::Tooltip,
 
@@ -218,5 +302,43 @@ impl Config {
         let content = serde_json::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_icon_rule_parsing() {
+        let json = r#"[
+            {
+              "class_regex": "^(firefox|chromium)$",
+              "icon": "󰖟",
+              "match_mode": "all",
+              "name": "Web browsers only"
+            }
+        ]"#;
+        
+        let rules: Vec<IconRule> = serde_json::from_str(json).expect("should parse");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].match_mode, IconMatchMode::All);
+    }
+    
+    #[test]
+    fn test_config_with_icon_rules() {
+        let json = r#"{
+          "default_icon": "○",
+          "icon_rules": [
+            {
+              "class_regex": "^firefox$",
+              "icon": "󰖟",
+              "match_mode": "all"
+            }
+          ]
+        }"#;
+        
+        let config: Config = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.icon_rules.len(), 1);
     }
 }
