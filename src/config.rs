@@ -266,6 +266,11 @@ pub struct Config {
     #[serde(default)]
     pub font_size: Option<f32>,
 
+    /// Icon font size in points (None = use font_size)
+    /// Nerd Font icons often need to be larger than text to appear balanced
+    #[serde(default)]
+    pub icon_font_size: Option<f32>,
+
     /// Custom font weight: "normal", "bold", "100"-"900" (None = use system default)
     #[serde(default)]
     pub font_weight: Option<String>,
@@ -402,6 +407,7 @@ impl Default for Config {
             // Typography - use system defaults
             font_family: None,
             font_size: None,
+            icon_font_size: None,
             font_weight: None,
 
             // Layout

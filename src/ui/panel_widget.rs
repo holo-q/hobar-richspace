@@ -174,8 +174,8 @@ impl WorkspaceWidget {
             color: alpha(@theme_fg_color, 0.65);
 "#);
 
-        // Typography for icon
-        Self::append_typography_css(&mut css, state);
+        // Typography for icon (uses icon_font_size if set)
+        Self::append_icon_typography_css(&mut css, state);
         css.push_str("        }\n\n");
 
         // Label styling - slightly dimmed by default
@@ -319,6 +319,26 @@ impl WorkspaceWidget {
         }
 
         if let Some(size) = state.config.font_size {
+            css.push_str(&format!("            font-size: {}pt;\n", size));
+        }
+
+        if let Some(ref weight) = state.config.font_weight {
+            css.push_str(&format!("            font-weight: {};\n", weight));
+        }
+    }
+
+    /// Append icon-specific typography CSS
+    ///
+    /// Uses icon_font_size if set, otherwise falls back to font_size.
+    /// Nerd Font icons often need larger sizes to appear balanced with text.
+    fn append_icon_typography_css(css: &mut String, state: &AppState) {
+        if let Some(ref family) = state.config.font_family {
+            css.push_str(&format!("            font-family: \"{}\";\n", family));
+        }
+
+        // Icon font size: use icon_font_size if set, else font_size
+        let icon_size = state.config.icon_font_size.or(state.config.font_size);
+        if let Some(size) = icon_size {
             css.push_str(&format!("            font-size: {}pt;\n", size));
         }
 
