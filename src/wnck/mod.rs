@@ -23,12 +23,20 @@ pub struct WorkspaceInfo {
 }
 
 /// Get information about all workspaces
+///
+/// Uses wnck's cached state rather than forcing X11 sync. This is safe because
+/// wnck updates its cache when X11 events arrive - by the time signals fire,
+/// the state is already current. Avoiding force_update() prevents GTK main thread
+/// blocking during rapid X11 activity (e.g., window dragging).
 pub fn get_workspaces() -> Vec<WorkspaceInfo> {
     let Some(screen) = Screen::get_default() else {
         return vec![];
     };
 
-    screen.force_update();
+    // NOTE: Do NOT call screen.force_update() here!
+    // force_update() does a synchronous X11 round-trip that blocks the GTK main thread.
+    // When X11 is busy (e.g., during window drag), this can freeze the panel for 7-15 seconds.
+    // wnck already updates its state via X11 event handlers before firing signals.
 
     let active_num = screen
         .active_workspace()

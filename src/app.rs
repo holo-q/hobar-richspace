@@ -17,6 +17,7 @@ use crate::providers::{self, ProviderEvent, ProviderRegistry};
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc::channel;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Application events
 #[derive(Debug)]
@@ -77,6 +78,9 @@ pub struct App {
     _watcher: Option<RecommendedWatcher>,
     /// Animation tick source (60fps when providers are animating)
     animation_source: Option<glib::SourceId>,
+    /// Last time provider triggered a full render (for throttling)
+    /// Provider dots need widget rebuild, but 60fps is excessive - 20fps is smooth enough
+    last_provider_render: Instant,
 }
 
 impl App {
@@ -143,6 +147,7 @@ impl App {
             tx: tx.clone(),
             _watcher: watcher,
             animation_source: None,
+            last_provider_render: Instant::now(),
         }));
 
         // Connect wnck signals
@@ -307,11 +312,37 @@ impl App {
 
     /// Handle an event
     fn handle_event(&mut self, event: AppEvent) {
+        let event_start = std::time::Instant::now();
+        let event_name = format!("{:?}", event);
+
         match event {
-            AppEvent::WorkspacesChanged | AppEvent::ActiveWorkspaceChanged | AppEvent::WindowsChanged => {
-                // Refresh workspace info
+            AppEvent::WorkspacesChanged | AppEvent::WindowsChanged => {
+                // Refresh workspace info - full rebuild needed
+                let t0 = std::time::Instant::now();
                 self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
+                let t1 = std::time::Instant::now();
                 self.widget.render(&self.app_state.borrow());
+                let t2 = std::time::Instant::now();
+                tracing::debug!(
+                    event = %event_name,
+                    get_workspaces_ms = t1.duration_since(t0).as_millis(),
+                    render_ms = t2.duration_since(t1).as_millis(),
+                    "workspace/window event"
+                );
+            }
+            AppEvent::ActiveWorkspaceChanged => {
+                // Light update - just refresh active state, no widget rebuild
+                // This is the fast path for workspace switching
+                let t0 = std::time::Instant::now();
+                self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
+                let t1 = std::time::Instant::now();
+                self.widget.update_active(&self.app_state.borrow());
+                let t2 = std::time::Instant::now();
+                tracing::debug!(
+                    get_workspaces_ms = t1.duration_since(t0).as_millis(),
+                    update_active_ms = t2.duration_since(t1).as_millis(),
+                    "active workspace changed"
+                );
             }
             AppEvent::StateFileChanged => {
                 // Reload state from file
@@ -324,15 +355,26 @@ impl App {
             AppEvent::ProviderUpdate(event) => {
                 // Update provider registry
                 self.app_state.borrow_mut().providers.handle_event(event);
-                // Re-render to show provider state
-                self.widget.render(&self.app_state.borrow());
+
+                // Throttle full renders to 20fps (50ms interval)
+                // Provider dots require widget rebuild, but 60fps is excessive for visual dots
+                // The animation tick handles smooth pulse decay via queue_redraw()
+                let now = Instant::now();
+                let elapsed = now.duration_since(self.last_provider_render);
+                if elapsed.as_millis() >= 50 {
+                    self.last_provider_render = now;
+                    self.widget.render(&self.app_state.borrow());
+                    tracing::trace!("provider render (throttled)");
+                }
+
                 // Start/stop animation tick based on provider state
                 self.update_animation_tick();
             }
             AppEvent::AnimationTick => {
                 // Called every 16ms when providers are animating
-                // Just re-render - providers handle their own animation state
-                self.widget.render(&self.app_state.borrow());
+                // Light update - just queue redraw, no widget rebuild
+                // Provider render state is already updated via ProviderUpdate events
+                self.widget.queue_redraw();
                 // Check if we should stop (no longer animating)
                 if !self.app_state.borrow().providers.any_animating() {
                     self.stop_animation_tick();
@@ -410,6 +452,16 @@ impl App {
             AppEvent::Free => {
                 self.cleanup();
             }
+        }
+
+        // Warn on slow events (>50ms is noticeable, >200ms is a stutter)
+        let elapsed = event_start.elapsed();
+        if elapsed.as_millis() > 50 {
+            tracing::warn!(
+                event = %event_name,
+                elapsed_ms = elapsed.as_millis(),
+                "SLOW EVENT"
+            );
         }
     }
 

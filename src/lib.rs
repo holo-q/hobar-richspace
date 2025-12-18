@@ -29,7 +29,7 @@ use xfce::{XfcePanelPluginPointer, XfcePanelPlugin};
 pub extern "C" fn constructor(pointer: XfcePanelPluginPointer) {
     // Initialize logging first (before any other operations)
     // Uses centralized spaceship-std logging with journald sink and SIGHUP hot-reload
-    spaceship_std::logging::init_simple("richspace", &spaceship_std::LoggingArgs::default());
+    spaceship_std::init_logging!("richspace", &spaceship_std::LoggingArgs::default());
 
     // Initialize GTK
     if gtk::init().is_err() {

@@ -320,11 +320,10 @@ impl WorkspaceWidget {
         }
     }
 
-    /// Render workspace buttons based on current state
+    /// Full render - rebuilds all workspace buttons
     ///
-    /// Refreshes CSS (in case config changed) and rebuilds all workspace buttons.
-    /// Provider-claimed workspaces use DrawingArea with cairo rendering instead
-    /// of standard GTK buttons.
+    /// Use this when workspace list changes or provider connections change.
+    /// For lighter updates (active workspace, animation), use update_active() or queue_redraw().
     pub fn render(&self, state: &AppState) {
         // Refresh CSS (supports live config reload for typography/padding)
         self.apply_default_css(state);
@@ -348,6 +347,32 @@ impl WorkspaceWidget {
         }
 
         self.container.show_all();
+    }
+
+    /// Light update - just refresh CSS classes for active state
+    ///
+    /// Much faster than full render. Use for workspace switches.
+    pub fn update_active(&self, state: &AppState) {
+        let buttons = self.buttons.borrow();
+        for (i, button) in buttons.iter().enumerate() {
+            let is_active = state.workspaces.get(i)
+                .map(|ws| ws.is_active)
+                .unwrap_or(false);
+
+            let ctx = button.style_context();
+            if is_active {
+                ctx.add_class("active");
+            } else {
+                ctx.remove_class("active");
+            }
+        }
+    }
+
+    /// Queue redraw on all widgets (for animation updates)
+    ///
+    /// Triggers repaint without rebuilding widgets.
+    pub fn queue_redraw(&self) {
+        self.container.queue_draw();
     }
 
     /// Create a button for a workspace
