@@ -6,7 +6,9 @@ pub use wnck_rs::{set_client_type, ClientType, Screen};
 
 /// Initialize wnck (must be called after GTK init)
 pub fn init() {
+    tracing::info!("wnck::init BEGIN - setting client type to Pager");
     set_client_type(ClientType::Pager);
+    tracing::info!("wnck::init END");
 }
 
 /// Workspace information for richspace display
@@ -31,7 +33,11 @@ pub struct WorkspaceInfo {
 /// the state is already current. Avoiding force_update() prevents GTK main thread
 /// blocking during rapid X11 activity (e.g., window dragging).
 pub fn get_workspaces() -> Vec<WorkspaceInfo> {
+    let start = std::time::Instant::now();
+    tracing::debug!("get_workspaces BEGIN");
+
     let Some(screen) = Screen::get_default() else {
+        tracing::debug!("get_workspaces END - no default screen available");
         return vec![];
     };
 
@@ -44,10 +50,12 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
         .active_workspace()
         .map(|ws| ws.get_number())
         .unwrap_or(-1);
+    tracing::trace!(active_workspace = active_num, "determined active workspace");
 
     let windows = screen.get_windows();
+    tracing::trace!(total_windows = windows.len(), "retrieved all windows");
 
-    screen
+    let workspaces: Vec<WorkspaceInfo> = screen
         .get_workspaces()
         .into_iter()
         .map(|ws| {
@@ -70,65 +78,130 @@ pub fn get_workspaces() -> Vec<WorkspaceInfo> {
                 .filter_map(|w| w.get_class_group())
                 .collect();
 
-            WorkspaceInfo {
+            let info = WorkspaceInfo {
                 number,
                 name: ws.get_name().unwrap_or_default(),
                 is_active: number == active_num,
                 window_count: ws_windows.len(),
-                window_classes,
-            }
+                window_classes: window_classes.clone(),
+            };
+
+            tracing::trace!(
+                workspace = number,
+                name = %info.name,
+                is_active = info.is_active,
+                window_count = info.window_count,
+                window_classes = ?window_classes,
+                "processed workspace"
+            );
+
+            info
         })
-        .collect()
+        .collect();
+
+    tracing::debug!(
+        count = workspaces.len(),
+        elapsed_us = start.elapsed().as_micros(),
+        "get_workspaces END"
+    );
+    workspaces
 }
 
 /// Get the active workspace number (0-indexed)
 #[allow(dead_code)]
 pub fn active_workspace_number() -> Option<i32> {
-    Screen::get_default()?
+    tracing::debug!("active_workspace_number BEGIN");
+    let result = Screen::get_default()?
         .active_workspace()
-        .map(|ws| ws.get_number())
+        .map(|ws| ws.get_number());
+    tracing::debug!(workspace = ?result, "active_workspace_number END");
+    result
 }
 
 /// Switch to a workspace by number
 pub fn switch_to_workspace(number: i32) {
-    let Some(screen) = Screen::get_default() else { return };
+    tracing::debug!(workspace = number, "switch_to_workspace BEGIN");
+
+    let Some(screen) = Screen::get_default() else {
+        tracing::error!("switch_to_workspace - no default screen available");
+        return;
+    };
 
     if let Some(ws) = screen.get_workspace(number) {
+        tracing::debug!(workspace = number, "activating workspace");
         ws.activate(0);
+        tracing::debug!(workspace = number, "switch_to_workspace END - activation requested");
+    } else {
+        tracing::error!(workspace = number, "switch_to_workspace END - workspace not found");
     }
 }
 
 /// Connect to workspace-changed signal (active workspace changed)
 pub fn connect_active_workspace_changed<F: Fn() + 'static>(f: F) {
+    tracing::debug!("connect_active_workspace_changed - registering signal handler");
     if let Some(screen) = Screen::get_default() {
-        screen.connect_active_workspace_changed(move |_| f());
+        screen.connect_active_workspace_changed(move |_| {
+            tracing::debug!("SIGNAL: active_workspace_changed fired");
+            f();
+        });
+        tracing::debug!("connect_active_workspace_changed - handler registered");
+    } else {
+        tracing::error!("connect_active_workspace_changed - no default screen available");
     }
 }
 
 /// Connect to workspace-created signal
 pub fn connect_workspace_created<F: Fn() + 'static>(f: F) {
+    tracing::debug!("connect_workspace_created - registering signal handler");
     if let Some(screen) = Screen::get_default() {
-        screen.connect_workspace_created(move |_| f());
+        screen.connect_workspace_created(move |_| {
+            tracing::debug!("SIGNAL: workspace_created fired");
+            f();
+        });
+        tracing::debug!("connect_workspace_created - handler registered");
+    } else {
+        tracing::error!("connect_workspace_created - no default screen available");
     }
 }
 
 /// Connect to workspace-destroyed signal
 pub fn connect_workspace_destroyed<F: Fn() + 'static>(f: F) {
+    tracing::debug!("connect_workspace_destroyed - registering signal handler");
     if let Some(screen) = Screen::get_default() {
-        screen.connect_workspace_destroyed(move |_| f());
+        screen.connect_workspace_destroyed(move |_| {
+            tracing::debug!("SIGNAL: workspace_destroyed fired");
+            f();
+        });
+        tracing::debug!("connect_workspace_destroyed - handler registered");
+    } else {
+        tracing::error!("connect_workspace_destroyed - no default screen available");
     }
 }
 
 /// Connect to window-opened signal (for updating window counts)
 pub fn connect_window_opened<F: Fn() + 'static>(f: F) {
+    tracing::debug!("connect_window_opened - registering signal handler");
     if let Some(screen) = Screen::get_default() {
-        screen.connect_window_opened(move |_| f());
+        screen.connect_window_opened(move |_| {
+            tracing::debug!("SIGNAL: window_opened fired");
+            f();
+        });
+        tracing::debug!("connect_window_opened - handler registered");
+    } else {
+        tracing::error!("connect_window_opened - no default screen available");
     }
 }
 
 /// Connect to window-closed signal
 pub fn connect_window_closed<F: Fn() + 'static>(f: F) {
+    tracing::debug!("connect_window_closed - registering signal handler");
     if let Some(screen) = Screen::get_default() {
-        screen.connect_window_closed(move |_| f());
+        screen.connect_window_closed(move |_| {
+            tracing::debug!("SIGNAL: window_closed fired");
+            f();
+        });
+        tracing::debug!("connect_window_closed - handler registered");
+    } else {
+        tracing::error!("connect_window_closed - no default screen available");
     }
 }

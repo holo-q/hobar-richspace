@@ -60,35 +60,154 @@ impl State {
     pub fn state_path() -> PathBuf {
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
             .unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(runtime_dir).join("richspace").join("state.json")
+        let path = PathBuf::from(&runtime_dir).join("richspace").join("state.json");
+        tracing::trace!(
+            path = %path.display(),
+            runtime_dir = %runtime_dir,
+            "resolved state file path"
+        );
+        path
     }
 
     /// Load state from ephemeral file
     pub fn load() -> Result<Self> {
+        let start = std::time::Instant::now();
         let path = Self::state_path();
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let state: State = serde_json::from_str(&content)?;
-            Ok(state)
+
+        tracing::debug!(
+            path = %path.display(),
+            exists = path.exists(),
+            "loading ephemeral state"
+        );
+
+        let state = if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    tracing::trace!(
+                        path = %path.display(),
+                        size_bytes = content.len(),
+                        "read state file content"
+                    );
+                    match serde_json::from_str::<State>(&content) {
+                        Ok(state) => {
+                            tracing::info!(
+                                path = %path.display(),
+                                workspace_count = state.workspaces.len(),
+                                version = state.version,
+                                elapsed_us = start.elapsed().as_micros(),
+                                "state loaded successfully"
+                            );
+                            state
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                path = %path.display(),
+                                error = %e,
+                                elapsed_us = start.elapsed().as_micros(),
+                                "failed to parse state JSON"
+                            );
+                            return Err(e.into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %e,
+                        elapsed_us = start.elapsed().as_micros(),
+                        "failed to read state file"
+                    );
+                    return Err(e.into());
+                }
+            }
         } else {
-            Ok(State::default())
-        }
+            tracing::info!(
+                path = %path.display(),
+                elapsed_us = start.elapsed().as_micros(),
+                "state file does not exist, using defaults"
+            );
+            State::default()
+        };
+
+        Ok(state)
     }
 
     /// Save state to ephemeral file
     pub fn save(&self) -> Result<()> {
+        let start = std::time::Instant::now();
         let path = Self::state_path();
+
+        tracing::debug!(
+            path = %path.display(),
+            workspace_count = self.workspaces.len(),
+            version = self.version,
+            "saving ephemeral state"
+        );
+
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.exists() {
+                tracing::trace!(dir = %parent.display(), "creating parent directory");
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::error!(
+                        dir = %parent.display(),
+                        error = %e,
+                        elapsed_us = start.elapsed().as_micros(),
+                        "failed to create parent directory"
+                    );
+                    return Err(e.into());
+                }
+            }
         }
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+
+        let content = match serde_json::to_string_pretty(self) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    elapsed_us = start.elapsed().as_micros(),
+                    "failed to serialize state to JSON"
+                );
+                return Err(e.into());
+            }
+        };
+
+        tracing::trace!(
+            path = %path.display(),
+            size_bytes = content.len(),
+            "writing state to file"
+        );
+
+        if let Err(e) = std::fs::write(&path, &content) {
+            tracing::error!(
+                path = %path.display(),
+                error = %e,
+                elapsed_us = start.elapsed().as_micros(),
+                "failed to write state file"
+            );
+            return Err(e.into());
+        }
+
+        tracing::info!(
+            path = %path.display(),
+            size_bytes = content.len(),
+            workspace_count = self.workspaces.len(),
+            version = self.version,
+            elapsed_us = start.elapsed().as_micros(),
+            "state saved successfully"
+        );
+
         Ok(())
     }
 
     /// Get state for a specific workspace
     pub fn get(&self, workspace_num: i32) -> Option<&WorkspaceState> {
-        self.workspaces.get(&workspace_num.to_string())
+        let result = self.workspaces.get(&workspace_num.to_string());
+        tracing::debug!(
+            workspace = workspace_num,
+            found = result.is_some(),
+            "get workspace state"
+        );
+        result
     }
 
     /// Set state for a specific workspace
@@ -100,23 +219,56 @@ impl State {
     /// Set custom label for a workspace
     pub fn set_label(&mut self, workspace: i32, label: Option<String>) {
         let key = workspace.to_string();
+        tracing::debug!(
+            workspace,
+            label = ?label,
+            version_before = self.version,
+            "set_label mutation"
+        );
         let entry = self.workspaces.entry(key).or_default();
-        entry.label = label;
+        entry.label = label.clone();
         self.version += 1;
+        tracing::trace!(
+            workspace,
+            version_after = self.version,
+            "set_label complete"
+        );
     }
 
     /// Set custom icon for a workspace
     pub fn set_icon(&mut self, workspace: i32, icon: Option<String>) {
         let key = workspace.to_string();
+        tracing::debug!(
+            workspace,
+            icon = ?icon,
+            version_before = self.version,
+            "set_icon mutation"
+        );
         let entry = self.workspaces.entry(key).or_default();
-        entry.icon = icon;
+        entry.icon = icon.clone();
         self.version += 1;
+        tracing::trace!(
+            workspace,
+            version_after = self.version,
+            "set_icon complete"
+        );
     }
 
     /// Clear state for a specific workspace (revert to defaults)
     pub fn clear(&mut self, workspace_num: i32) {
-        self.workspaces.remove(&workspace_num.to_string());
+        tracing::debug!(
+            workspace = workspace_num,
+            version_before = self.version,
+            "clear workspace mutation"
+        );
+        let removed = self.workspaces.remove(&workspace_num.to_string());
         self.version += 1;
+        tracing::trace!(
+            workspace = workspace_num,
+            had_state = removed.is_some(),
+            version_after = self.version,
+            "clear complete"
+        );
     }
 
     /// Clear all workspace states

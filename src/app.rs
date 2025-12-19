@@ -15,7 +15,9 @@ use crate::ui::WorkspaceWidget;
 use crate::providers::{self, ProviderEvent, ProviderRegistry};
 
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -30,6 +32,8 @@ pub enum AppEvent {
     WindowsChanged,
     /// State file changed (live reload)
     StateFileChanged,
+    /// Config file changed (hot reload rules, icons, etc.)
+    ConfigFileChanged,
     /// Provider IPC event (render update, connection, etc.)
     ProviderUpdate(ProviderEvent),
     /// Animation tick (16ms for 60fps when providers are animating)
@@ -75,31 +79,66 @@ pub struct App {
     widget: WorkspaceWidget,
     tx: glib::Sender<AppEvent>,
     /// File watcher for state live reload (kept alive)
-    _watcher: Option<RecommendedWatcher>,
+    _state_watcher: Option<RecommendedWatcher>,
+    /// File watcher for config hot reload (kept alive)
+    _config_watcher: Option<RecommendedWatcher>,
     /// Animation tick source (60fps when providers are animating)
     animation_source: Option<glib::SourceId>,
     /// Last time provider triggered a full render (for throttling)
     /// Provider dots need widget rebuild, but 60fps is excessive - 20fps is smooth enough
     last_provider_render: Instant,
+    /// Shutdown signal for background watcher threads
+    /// Set to true on cleanup to gracefully stop file watchers before plugin unload
+    shutdown: Arc<AtomicBool>,
 }
 
 impl App {
     /// Start the application
+    ///
+    /// Initialization sequence with comprehensive tracing for debugging.
     pub fn start(plugin: XfcePanelPlugin) {
+        let start = Instant::now();
+        tracing::info!("App::start BEGIN");
+
         // Load persistent config
+        tracing::debug!("loading config");
         let config_path = plugin.config_path();
         let config = config_path
             .as_ref()
-            .and_then(|p| Config::load(p).ok())
-            .unwrap_or_default();
+            .and_then(|p| {
+                tracing::debug!(path = %p.display(), "loading config from path");
+                Config::load(p).ok()
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!("using default config (no config file found)");
+                Config::default()
+            });
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis(),
+            icon_rules = config.icon_rules.len(),
+            "config loaded"
+        );
 
         // Load ephemeral state
+        tracing::debug!("loading ephemeral state");
         let state = State::load().unwrap_or_default();
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis(),
+            workspaces_with_state = state.workspaces.len(),
+            "state loaded"
+        );
 
         // Get initial workspace info
+        tracing::debug!("fetching initial workspace info");
         let workspaces = wnck::get_workspaces();
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis(),
+            workspace_count = workspaces.len(),
+            "workspaces fetched"
+        );
 
         // Create application state
+        tracing::debug!("creating application state");
         let app_state = Rc::new(RefCell::new(AppState {
             config,
             config_path,
@@ -111,26 +150,41 @@ impl App {
         }));
 
         // Create message channel
+        tracing::debug!("creating glib message channel");
         let (tx, rx) = glib::MainContext::channel(glib::Priority::DEFAULT);
 
         // Create UI
+        tracing::debug!("creating workspace widget");
         let widget = WorkspaceWidget::new(&app_state.borrow(), tx.clone());
         plugin.container.add(widget.widget());
         plugin.add_action_widget(widget.widget());
+        tracing::debug!(elapsed_ms = start.elapsed().as_millis(), "widget created and added");
 
         // Show configure in menu
         plugin.menu_show_configure();
 
-        // Set up file watcher for state live reload
-        let watcher = Self::setup_state_watcher(tx.clone());
+        // Shutdown signal for background threads - set on cleanup to gracefully stop watchers
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // Set up file watchers for live reload
+        tracing::debug!("setting up file watchers");
+        let state_watcher = Self::setup_state_watcher(tx.clone(), shutdown.clone());
+        let config_watcher = Self::setup_config_watcher(tx.clone(), app_state.borrow().config_path.clone(), shutdown.clone());
+        tracing::debug!(
+            state_watcher = state_watcher.is_some(),
+            config_watcher = config_watcher.is_some(),
+            "file watchers configured"
+        );
 
         // Start provider IPC listener (separate channel to wrap ProviderEvent in AppEvent)
+        tracing::debug!("starting provider IPC listener");
         {
             let tx = tx.clone();
             let (provider_tx, provider_rx) = glib::MainContext::channel::<ProviderEvent>(glib::Priority::DEFAULT);
 
             // Bridge provider events to main event loop
             provider_rx.attach(None, move |event| {
+                tracing::trace!(event = ?event, "provider event bridged to main loop");
                 tx.send(AppEvent::ProviderUpdate(event)).ok();
                 glib::ControlFlow::Continue
             });
@@ -138,60 +192,74 @@ impl App {
             // Start the listener (runs in background thread with tokio)
             providers::start_listener(provider_tx);
         }
+        tracing::debug!(elapsed_ms = start.elapsed().as_millis(), "provider listener started");
 
         // Create app
+        tracing::debug!("creating App instance");
         let app = Rc::new(RefCell::new(App {
             plugin,
             app_state: app_state.clone(),
             widget,
             tx: tx.clone(),
-            _watcher: watcher,
+            _state_watcher: state_watcher,
+            _config_watcher: config_watcher,
             animation_source: None,
             last_provider_render: Instant::now(),
+            shutdown,
         }));
 
         // Connect wnck signals
+        tracing::debug!("connecting wnck signals");
         {
             let tx = tx.clone();
             wnck::connect_active_workspace_changed(move || {
+                tracing::debug!("wnck: active_workspace_changed signal");
                 tx.send(AppEvent::ActiveWorkspaceChanged).ok();
             });
         }
         {
             let tx = tx.clone();
             wnck::connect_workspace_created(move || {
+                tracing::debug!("wnck: workspace_created signal");
                 tx.send(AppEvent::WorkspacesChanged).ok();
             });
         }
         {
             let tx = tx.clone();
             wnck::connect_workspace_destroyed(move || {
+                tracing::debug!("wnck: workspace_destroyed signal");
                 tx.send(AppEvent::WorkspacesChanged).ok();
             });
         }
         {
             let tx = tx.clone();
             wnck::connect_window_opened(move || {
+                tracing::debug!("wnck: window_opened signal");
                 tx.send(AppEvent::WindowsChanged).ok();
             });
         }
         {
             let tx = tx.clone();
             wnck::connect_window_closed(move || {
+                tracing::debug!("wnck: window_closed signal");
                 tx.send(AppEvent::WindowsChanged).ok();
             });
         }
+        tracing::debug!("wnck signals connected");
 
         // Connect panel signals
+        tracing::debug!("connecting panel signals");
         {
             let tx = tx.clone();
             app.borrow().plugin.connect_orientation_changed(move |orientation| {
+                tracing::debug!(?orientation, "panel: orientation_changed signal");
                 tx.send(AppEvent::OrientationChanged(orientation)).ok();
             });
         }
         {
             let tx = tx.clone();
             app.borrow().plugin.connect_size_changed(move |size| {
+                tracing::debug!(size, "panel: size_changed signal");
                 tx.send(AppEvent::SizeChanged(size)).ok();
                 true
             });
@@ -199,23 +267,28 @@ impl App {
         {
             let tx = tx.clone();
             app.borrow().plugin.connect_configure_plugin(move || {
+                tracing::debug!("panel: configure_plugin signal");
                 tx.send(AppEvent::Configure).ok();
             });
         }
         {
             let tx = tx.clone();
             app.borrow().plugin.connect_save(move || {
+                tracing::debug!("panel: save signal");
                 tx.send(AppEvent::Save).ok();
             });
         }
         {
             let tx = tx.clone();
             app.borrow().plugin.connect_free_data(move || {
+                tracing::info!("panel: free_data signal (plugin unloading)");
                 tx.send(AppEvent::Free).ok();
             });
         }
+        tracing::debug!("panel signals connected");
 
         // Set up event handler
+        tracing::debug!("attaching event handler to main context");
         {
             let app_ref = app.clone();
             rx.attach(None, move |event| {
@@ -225,11 +298,19 @@ impl App {
         }
 
         // Show everything
+        tracing::debug!("showing all widgets");
         app.borrow().plugin.container.show_all();
+
+        tracing::info!(
+            total_ms = start.elapsed().as_millis(),
+            "App::start END - event loop now running"
+        );
     }
 
     /// Set up file watcher for state live reload
-    fn setup_state_watcher(tx: glib::Sender<AppEvent>) -> Option<RecommendedWatcher> {
+    ///
+    /// Background thread checks shutdown flag every 100ms to allow graceful exit.
+    fn setup_state_watcher(tx: glib::Sender<AppEvent>, shutdown: Arc<AtomicBool>) -> Option<RecommendedWatcher> {
         let state_path = State::state_path();
 
         // Create parent directory if it doesn't exist
@@ -269,8 +350,22 @@ impl App {
             // Simple debouncing with last event time
             let mut last_event = std::time::Instant::now();
             let debounce = std::time::Duration::from_millis(100);
+            let poll_timeout = std::time::Duration::from_millis(100);
 
-            while let Ok(result) = event_rx.recv() {
+            loop {
+                // Check shutdown signal
+                if shutdown.load(Ordering::SeqCst) {
+                    tracing::debug!("state watcher thread shutting down");
+                    break;
+                }
+
+                // Use timeout recv to allow periodic shutdown checks
+                let result = match event_rx.recv_timeout(poll_timeout) {
+                    Ok(r) => r,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+
                 match result {
                     Ok(event) => {
                         // Only care about modify/create events
@@ -294,7 +389,10 @@ impl App {
                         }
                         last_event = now;
 
-                        // Send event to main thread
+                        // Send event to main thread (check shutdown before sending)
+                        if shutdown.load(Ordering::SeqCst) {
+                            break;
+                        }
                         if let Err(e) = tx.send(AppEvent::StateFileChanged) {
                             tracing::error!("failed to send state change event: {}", e);
                             break;
@@ -310,51 +408,203 @@ impl App {
         Some(watcher)
     }
 
+    /// Set up file watcher for config hot reload
+    ///
+    /// Watches the config TOML file for changes, enabling live editing of
+    /// icon rules, macros, and display settings without panel restart.
+    /// Background thread checks shutdown flag every 100ms to allow graceful exit.
+    fn setup_config_watcher(tx: glib::Sender<AppEvent>, config_path: Option<PathBuf>, shutdown: Arc<AtomicBool>) -> Option<RecommendedWatcher> {
+        let config_path = config_path?;
+
+        // Get the TOML path (config might be stored as .toml)
+        let toml_path = Config::toml_path(&config_path);
+        let watch_path = toml_path.parent()?;
+
+        // Set up notify watcher
+        let (event_tx, event_rx) = channel();
+        let config = NotifyConfig::default();
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res| {
+                let _ = event_tx.send(res);
+            },
+            config,
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("failed to create config file watcher: {}", e);
+                return None;
+            }
+        };
+
+        // Watch the parent directory
+        if let Err(e) = watcher.watch(watch_path, RecursiveMode::NonRecursive) {
+            tracing::error!("failed to watch config directory: {}", e);
+            return None;
+        }
+
+        tracing::info!("watching {} for config changes", watch_path.display());
+
+        // Spawn background thread to process events
+        let toml_path_clone = toml_path.clone();
+        std::thread::spawn(move || {
+            let mut last_event = std::time::Instant::now();
+            let debounce = std::time::Duration::from_millis(200); // Slightly longer debounce for config
+            let poll_timeout = std::time::Duration::from_millis(100);
+
+            loop {
+                // Check shutdown signal
+                if shutdown.load(Ordering::SeqCst) {
+                    tracing::debug!("config watcher thread shutting down");
+                    break;
+                }
+
+                // Use timeout recv to allow periodic shutdown checks
+                let result = match event_rx.recv_timeout(poll_timeout) {
+                    Ok(r) => r,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+
+                match result {
+                    Ok(event) => {
+                        // Only care about modify/create events
+                        if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                            continue;
+                        }
+
+                        // Check if this event is for our config file
+                        let is_config_file = event.paths.iter().any(|p| {
+                            p.file_name() == toml_path_clone.file_name()
+                        });
+
+                        if !is_config_file {
+                            continue;
+                        }
+
+                        // Debounce
+                        let now = std::time::Instant::now();
+                        if now.duration_since(last_event) < debounce {
+                            continue;
+                        }
+                        last_event = now;
+
+                        // Send event to main thread (check shutdown before sending)
+                        if shutdown.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Err(e) = tx.send(AppEvent::ConfigFileChanged) {
+                            tracing::error!("failed to send config change event: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("config file watch error: {}", e);
+                    }
+                }
+            }
+        });
+
+        Some(watcher)
+    }
+
     /// Handle an event
+    ///
+    /// Central event dispatcher with comprehensive timing instrumentation.
+    /// All events are logged at appropriate levels:
+    /// - TRACE: AnimationTick (60fps, very noisy)
+    /// - DEBUG: Normal events with timing
+    /// - WARN: Slow events (>50ms)
+    /// - ERROR: Failures
     fn handle_event(&mut self, event: AppEvent) {
-        let event_start = std::time::Instant::now();
-        let event_name = format!("{:?}", event);
+        let event_start = Instant::now();
+
+        // Pre-log for non-trace events (AnimationTick is too noisy)
+        let is_animation = matches!(event, AppEvent::AnimationTick);
+        if !is_animation {
+            tracing::debug!(event = ?event, "handle_event BEGIN");
+        }
 
         match event {
             AppEvent::WorkspacesChanged | AppEvent::WindowsChanged => {
                 // Refresh workspace info - full rebuild needed
-                let t0 = std::time::Instant::now();
+                let t0 = Instant::now();
+                tracing::trace!("fetching workspaces");
                 self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
-                let t1 = std::time::Instant::now();
+                let t1 = Instant::now();
+                let ws_count = self.app_state.borrow().workspaces.len();
+                tracing::trace!(workspace_count = ws_count, "rendering widget");
                 self.widget.render(&self.app_state.borrow());
-                let t2 = std::time::Instant::now();
+                let t2 = Instant::now();
                 tracing::debug!(
-                    event = %event_name,
-                    get_workspaces_ms = t1.duration_since(t0).as_millis(),
-                    render_ms = t2.duration_since(t1).as_millis(),
-                    "workspace/window event"
+                    workspace_count = ws_count,
+                    get_workspaces_us = t1.duration_since(t0).as_micros(),
+                    render_us = t2.duration_since(t1).as_micros(),
+                    "workspace/window change processed"
                 );
             }
             AppEvent::ActiveWorkspaceChanged => {
                 // Light update - just refresh active state, no widget rebuild
                 // This is the fast path for workspace switching
-                let t0 = std::time::Instant::now();
+                let t0 = Instant::now();
                 self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
-                let t1 = std::time::Instant::now();
+                let t1 = Instant::now();
+                let active = self.app_state.borrow().workspaces.iter()
+                    .find(|ws| ws.is_active)
+                    .map(|ws| ws.number);
                 self.widget.update_active(&self.app_state.borrow());
-                let t2 = std::time::Instant::now();
+                let t2 = Instant::now();
                 tracing::debug!(
-                    get_workspaces_ms = t1.duration_since(t0).as_millis(),
-                    update_active_ms = t2.duration_since(t1).as_millis(),
+                    active_workspace = ?active,
+                    get_workspaces_us = t1.duration_since(t0).as_micros(),
+                    update_active_us = t2.duration_since(t1).as_micros(),
                     "active workspace changed"
                 );
             }
             AppEvent::StateFileChanged => {
                 // Reload state from file
-                if let Ok(new_state) = State::load() {
-                    self.app_state.borrow_mut().state = new_state;
-                    self.widget.render(&self.app_state.borrow());
-                    tracing::info!("state reloaded from file");
+                tracing::debug!("reloading state file");
+                match State::load() {
+                    Ok(new_state) => {
+                        let ws_count = new_state.workspaces.len();
+                        self.app_state.borrow_mut().state = new_state;
+                        self.widget.render(&self.app_state.borrow());
+                        tracing::info!(workspaces_with_state = ws_count, "state reloaded from file");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to reload state file");
+                    }
                 }
             }
-            AppEvent::ProviderUpdate(event) => {
+            AppEvent::ConfigFileChanged => {
+                // Hot reload config (icon rules, macros, display settings)
+                tracing::debug!("hot-reloading config");
+                if let Some(ref path) = self.app_state.borrow().config_path.clone() {
+                    match Config::load(&path) {
+                        Ok(new_config) => {
+                            let rule_count = new_config.icon_rules.len();
+                            self.app_state.borrow_mut().config = new_config;
+                            self.widget.render(&self.app_state.borrow());
+                            tracing::info!(
+                                path = %path.display(),
+                                icon_rules = rule_count,
+                                "config hot-reloaded"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                path = %path.display(),
+                                error = %e,
+                                "failed to reload config"
+                            );
+                        }
+                    }
+                }
+            }
+            AppEvent::ProviderUpdate(ref provider_event) => {
                 // Update provider registry
-                self.app_state.borrow_mut().providers.handle_event(event);
+                tracing::trace!(event = ?provider_event, "provider update");
+                self.app_state.borrow_mut().providers.handle_event(provider_event.clone());
 
                 // Throttle full renders to 20fps (50ms interval)
                 // Provider dots require widget rebuild, but 60fps is excessive for visual dots
@@ -363,8 +613,8 @@ impl App {
                 let elapsed = now.duration_since(self.last_provider_render);
                 if elapsed.as_millis() >= 50 {
                     self.last_provider_render = now;
-                    self.widget.render(&self.app_state.borrow());
                     tracing::trace!("provider render (throttled)");
+                    self.widget.render(&self.app_state.borrow());
                 }
 
                 // Start/stop animation tick based on provider state
@@ -379,15 +629,19 @@ impl App {
                 if !self.app_state.borrow().providers.any_animating() {
                     self.stop_animation_tick();
                 }
+                // No logging - too noisy at 60fps
             }
             AppEvent::OrientationChanged(orientation) => {
+                tracing::debug!(?orientation, "orientation changed");
                 self.app_state.borrow_mut().orientation = orientation;
                 self.widget.set_orientation(orientation);
             }
             AppEvent::SizeChanged(size) => {
+                tracing::debug!(size, "size changed");
                 self.app_state.borrow_mut().size = size;
             }
             AppEvent::WorkspaceClicked(num) => {
+                tracing::debug!(workspace = num, "workspace clicked - switching");
                 wnck::switch_to_workspace(num);
             }
             AppEvent::ScrollWorkspace { delta, wrap } => {
@@ -396,6 +650,7 @@ impl App {
                 let count = self.app_state.borrow().workspaces.len() as i32;
 
                 if count == 0 {
+                    tracing::warn!("scroll ignored - no workspaces");
                     return;
                 }
 
@@ -410,58 +665,83 @@ impl App {
                     next = next.clamp(0, count - 1);
                 }
 
-                // Switch to the calculated workspace
+                tracing::debug!(
+                    current = current,
+                    delta = delta,
+                    next = next,
+                    wrap = wrap,
+                    "scroll workspace"
+                );
                 wnck::switch_to_workspace(next);
             }
-            AppEvent::SetWorkspaceLabel { workspace, label } => {
+            AppEvent::SetWorkspaceLabel { workspace, ref label } => {
+                tracing::debug!(workspace, label = ?label, "set workspace label");
                 // Update ephemeral state with custom label
-                self.app_state.borrow_mut().state.set_label(workspace, label);
+                self.app_state.borrow_mut().state.set_label(workspace, label.clone());
                 // Save to disk (for external tools and persistence)
                 if let Err(e) = self.app_state.borrow().state.save() {
-                    tracing::error!("failed to save state: {}", e);
+                    tracing::error!(error = %e, "failed to save state");
                 }
                 // Render immediately (don't wait for file watcher)
                 self.widget.render(&self.app_state.borrow());
             }
-            AppEvent::SetWorkspaceIcon { workspace, icon } => {
+            AppEvent::SetWorkspaceIcon { workspace, ref icon } => {
+                tracing::debug!(workspace, icon = ?icon, "set workspace icon");
                 // Update ephemeral state with custom icon
-                self.app_state.borrow_mut().state.set_icon(workspace, icon);
+                self.app_state.borrow_mut().state.set_icon(workspace, icon.clone());
                 // Save to disk
                 if let Err(e) = self.app_state.borrow().state.save() {
-                    tracing::error!("failed to save state: {}", e);
+                    tracing::error!(error = %e, "failed to save state");
                 }
                 // Render immediately
                 self.widget.render(&self.app_state.borrow());
             }
             AppEvent::ClearWorkspaceCustomizations { workspace } => {
+                tracing::debug!(workspace, "clear workspace customizations");
                 // Clear all customizations for this workspace (revert to defaults)
                 self.app_state.borrow_mut().state.clear(workspace);
                 // Save to disk
                 if let Err(e) = self.app_state.borrow().state.save() {
-                    tracing::error!("failed to save state: {}", e);
+                    tracing::error!(error = %e, "failed to save state");
                 }
                 // Render immediately
                 self.widget.render(&self.app_state.borrow());
             }
             AppEvent::Configure => {
+                tracing::info!("configure requested");
                 self.show_config_dialog();
             }
             AppEvent::Save => {
+                tracing::debug!("save requested");
                 self.save_config();
             }
             AppEvent::Free => {
+                tracing::info!("free requested - beginning cleanup");
                 self.cleanup();
             }
         }
 
-        // Warn on slow events (>50ms is noticeable, >200ms is a stutter)
+        // Post-event timing for non-animation events
         let elapsed = event_start.elapsed();
-        if elapsed.as_millis() > 50 {
-            tracing::warn!(
-                event = %event_name,
-                elapsed_ms = elapsed.as_millis(),
-                "SLOW EVENT"
-            );
+        if !is_animation {
+            if elapsed.as_millis() > 200 {
+                tracing::error!(
+                    event = ?event,
+                    elapsed_ms = elapsed.as_millis(),
+                    "CRITICAL: Event took >200ms - UI stutter"
+                );
+            } else if elapsed.as_millis() > 50 {
+                tracing::warn!(
+                    event = ?event,
+                    elapsed_ms = elapsed.as_millis(),
+                    "SLOW: Event took >50ms"
+                );
+            } else {
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros(),
+                    "handle_event END"
+                );
+            }
         }
     }
 
@@ -482,9 +762,14 @@ impl App {
     }
 
     /// Cleanup before exit
+    ///
+    /// Signals background watcher threads to stop, preventing crash on plugin unload.
     fn cleanup(&mut self) {
+        // Signal watcher threads to stop (they check this every 100ms)
+        self.shutdown.store(true, Ordering::SeqCst);
         self.stop_animation_tick();
         self.save_config();
+        tracing::info!("cleanup complete, watchers signaled to stop");
     }
 
     /// Start/stop animation tick based on provider state

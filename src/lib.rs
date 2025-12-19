@@ -5,6 +5,18 @@
 //!
 //! State is ephemeral - stored in $XDG_RUNTIME_DIR and resets on logout.
 //! Configuration can be modified via JSON file with live reload.
+//!
+//! ## Tracing
+//!
+//! Comprehensive instrumentation for debugging freezes/lockups.
+//! View logs: `journalctl -t richspace -f`
+//!
+//! Log levels:
+//! - ERROR: Failures that break functionality
+//! - WARN: Degraded operation, non-fatal issues
+//! - INFO: Lifecycle events (start, stop, reload)
+//! - DEBUG: Event flow, state changes
+//! - TRACE: Hot path details (render, animation ticks)
 
 mod xfce;
 mod wnck;
@@ -31,18 +43,37 @@ pub extern "C" fn constructor(pointer: XfcePanelPluginPointer) {
     // Uses centralized spaceship-std logging with journald sink and SIGHUP hot-reload
     spaceship_std::init_logging!("richspace", &spaceship_std::LoggingArgs::default());
 
+    let start = std::time::Instant::now();
+    tracing::info!("═══ richspace plugin constructor BEGIN ═══");
+
     // Initialize GTK
+    tracing::debug!("initializing GTK");
     if gtk::init().is_err() {
-        tracing::error!("Failed to initialize GTK");
+        tracing::error!("FATAL: failed to initialize GTK");
         return;
     }
+    tracing::debug!(elapsed_ms = start.elapsed().as_millis(), "GTK initialized");
 
     // Initialize wnck (must happen after GTK init)
+    tracing::debug!("initializing wnck");
     wnck::init();
+    tracing::debug!(elapsed_ms = start.elapsed().as_millis(), "wnck initialized");
 
     // Wrap the raw pointer
+    tracing::debug!(pointer = ?pointer, "wrapping plugin pointer");
     let plugin = XfcePanelPlugin::from_raw(pointer);
+    tracing::info!(
+        plugin_id = plugin.id(),
+        plugin_name = plugin.name(),
+        "plugin wrapped"
+    );
 
     // Start the application
+    tracing::debug!("starting application");
     app::App::start(plugin);
+
+    tracing::info!(
+        total_ms = start.elapsed().as_millis(),
+        "═══ richspace plugin constructor END ═══"
+    );
 }

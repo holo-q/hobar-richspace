@@ -45,8 +45,10 @@ pub enum XfcePanelPluginMode {
 #[allow(dead_code)]
 extern "C" {
     // Plugin identity
+    // NOTE: There is no xfce_panel_plugin_get_id - use get_name + get_unique_id
+    // The "plugin-15" style ID must be constructed from name + unique_id
     pub fn xfce_panel_plugin_get_name(plugin: XfcePanelPluginPointer) -> *const c_char;
-    pub fn xfce_panel_plugin_get_id(plugin: XfcePanelPluginPointer) -> *const c_char;
+    pub fn xfce_panel_plugin_get_unique_id(plugin: XfcePanelPluginPointer) -> c_int;
 
     // Panel geometry
     pub fn xfce_panel_plugin_get_orientation(plugin: XfcePanelPluginPointer) -> gtk_sys::GtkOrientation;

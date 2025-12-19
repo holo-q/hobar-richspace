@@ -23,15 +23,12 @@ impl XfcePanelPlugin {
         XfcePanelPlugin { pointer, container }
     }
 
-    /// Get plugin unique ID (e.g., "richspace-1")
+    /// Get plugin unique ID (e.g., "richspace-15")
+    /// Constructed from name + unique_id since XFCE doesn't provide a combined getter
     pub fn id(&self) -> String {
-        unsafe {
-            let ptr = ffi::xfce_panel_plugin_get_id(self.pointer);
-            if ptr.is_null() {
-                return String::from("unknown");
-            }
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
-        }
+        let name = self.name();
+        let unique_id = unsafe { ffi::xfce_panel_plugin_get_unique_id(self.pointer) };
+        format!("{}-{}", name, unique_id)
     }
 
     /// Get plugin name

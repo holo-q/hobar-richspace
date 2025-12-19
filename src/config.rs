@@ -156,17 +156,42 @@ impl IconRule {
     /// - Any: at least one class must match
     pub fn matches(&self, classes: &[String], macros: &HashMap<String, Vec<String>>) -> bool {
         if classes.is_empty() {
+            tracing::trace!(
+                rule_name = ?self.name,
+                rule_icon = %self.icon,
+                "no classes to match, returning false"
+            );
             return false;
         }
 
         let Some(regex) = self.compile_regex(macros) else {
+            tracing::trace!(
+                rule_name = ?self.name,
+                rule_icon = %self.icon,
+                macro_name = ?self.r#macro,
+                class_regex = ?self.class_regex,
+                "failed to compile regex, returning false"
+            );
             return false;
         };
 
-        match self.match_mode {
+        let result = match self.match_mode {
             IconMatchMode::All => classes.iter().all(|c| regex.is_match(c)),
             IconMatchMode::Any => classes.iter().any(|c| regex.is_match(c)),
-        }
+        };
+
+        tracing::trace!(
+            rule_name = ?self.name,
+            rule_icon = %self.icon,
+            match_mode = ?self.match_mode,
+            macro_name = ?self.r#macro,
+            class_regex = ?self.class_regex,
+            classes = ?classes,
+            matched = result,
+            "icon rule match evaluation"
+        );
+
+        result
     }
 }
 
@@ -373,8 +398,14 @@ impl Default for Config {
             macros: default_macros(),
 
             // Legacy fields - kept for backward compatibility
-            default_icon: "○".to_string(),
-            active_icon: Some("●".to_string()),
+            //
+            // Icon namespace gotcha: Panel fonts typically only support Material Design Icons
+            // (󰀀-󿿿 range, U+F0000+). Codicons (U+E7xx) and Devicons (U+E6xx) render as boxes.
+            // Stick to md-* icons from Nerd Fonts for reliable display.
+            //
+            // 󰝥 = md-circle (filled = has windows), 󰝣 = md-circle_outline (empty)
+            default_icon: "󰝥".to_string(),
+            active_icon: Some("󰝥".to_string()),
             show_numbers: false,
             show_name_tooltips: true,
             show_window_count: false,
@@ -389,7 +420,8 @@ impl Default for Config {
             active_only_label: false,
 
             // Icons
-            empty_icon: Some("·".to_string()),
+            // 󰝣 = md-circle_outline - empty/no windows
+            empty_icon: Some("󰝣".to_string()),
 
             // Icon rules (empty by default - user configures)
             icon_rules: Vec::new(),
@@ -425,10 +457,36 @@ impl Config {
     /// Default macros not overridden by user are preserved.
     fn merge_macros(&mut self) {
         let defaults = default_macros();
+        let user_macros_count = self.macros.len();
+        let defaults_count = defaults.len();
+
+        tracing::debug!(
+            user_macros = user_macros_count,
+            default_macros = defaults_count,
+            "merging macros"
+        );
+
+        let mut added_count = 0;
         for (name, classes) in defaults {
             // Only insert if user didn't define this macro
-            self.macros.entry(name).or_insert(classes);
+            if self.macros.entry(name.clone()).or_insert_with(|| {
+                added_count += 1;
+                classes.clone()
+            }).len() > 0 {
+                tracing::trace!(
+                    macro_name = %name,
+                    class_count = classes.len(),
+                    was_user_defined = added_count == 0,
+                    "macro in final set"
+                );
+            }
         }
+
+        tracing::debug!(
+            total_macros = self.macros.len(),
+            added_defaults = added_count,
+            "macros merged"
+        );
     }
 
     /// Load config from TOML file (with JSON fallback for migration)
@@ -437,44 +495,152 @@ impl Config {
     /// If JSON is loaded, it will be migrated to TOML on next save.
     /// Default macros are merged with user-defined ones.
     pub fn load(path: &PathBuf) -> Result<Self> {
+        let start = std::time::Instant::now();
+
+        tracing::debug!(
+            path = %path.display(),
+            "loading config"
+        );
+
         // Try TOML first
         let toml_path = path.with_extension("toml");
         if toml_path.exists() {
-            let content = std::fs::read_to_string(&toml_path)?;
-            let mut config: Config = toml::from_str(&content)?;
-            config.merge_macros();
-            tracing::debug!(path = %toml_path.display(), "Loaded config from TOML");
-            return Ok(config);
+            tracing::trace!(path = %toml_path.display(), "attempting TOML load");
+            match std::fs::read_to_string(&toml_path) {
+                Ok(content) => {
+                    tracing::trace!(
+                        path = %toml_path.display(),
+                        size_bytes = content.len(),
+                        "read TOML file content"
+                    );
+                    match toml::from_str::<Config>(&content) {
+                        Ok(mut config) => {
+                            config.merge_macros();
+                            tracing::info!(
+                                path = %toml_path.display(),
+                                icon_rules = config.icon_rules.len(),
+                                macros = config.macros.len(),
+                                elapsed_us = start.elapsed().as_micros(),
+                                "config loaded from TOML"
+                            );
+                            return Ok(config);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                path = %toml_path.display(),
+                                error = %e,
+                                elapsed_us = start.elapsed().as_micros(),
+                                "failed to parse TOML config"
+                            );
+                            return Err(e.into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        path = %toml_path.display(),
+                        error = %e,
+                        elapsed_us = start.elapsed().as_micros(),
+                        "failed to read TOML config file"
+                    );
+                    return Err(e.into());
+                }
+            }
         }
 
         // Fallback to JSON for backward compatibility
         let json_path = path.with_extension("json");
         if json_path.exists() {
-            let content = std::fs::read_to_string(&json_path)?;
-            let mut config: Config = serde_json::from_str(&content)?;
-            config.merge_macros();
-            tracing::info!(
-                json_path = %json_path.display(),
-                toml_path = %toml_path.display(),
-                "Loaded config from JSON (will migrate to TOML on save)"
-            );
-            return Ok(config);
+            tracing::trace!(path = %json_path.display(), "attempting JSON load (fallback)");
+            match std::fs::read_to_string(&json_path) {
+                Ok(content) => {
+                    tracing::trace!(
+                        path = %json_path.display(),
+                        size_bytes = content.len(),
+                        "read JSON file content"
+                    );
+                    match serde_json::from_str::<Config>(&content) {
+                        Ok(mut config) => {
+                            config.merge_macros();
+                            tracing::info!(
+                                json_path = %json_path.display(),
+                                toml_path = %toml_path.display(),
+                                icon_rules = config.icon_rules.len(),
+                                macros = config.macros.len(),
+                                elapsed_us = start.elapsed().as_micros(),
+                                "config loaded from JSON (will migrate to TOML on save)"
+                            );
+                            return Ok(config);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %json_path.display(),
+                                error = %e,
+                                elapsed_us = start.elapsed().as_micros(),
+                                "failed to parse JSON config"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %json_path.display(),
+                        error = %e,
+                        "failed to read JSON config file"
+                    );
+                }
+            }
         }
 
         // Also try the exact path (for edge cases)
         if path.exists() {
-            let content = std::fs::read_to_string(path)?;
-            // Try TOML first, then JSON
-            if let Ok(mut config) = toml::from_str::<Config>(&content) {
-                config.merge_macros();
-                return Ok(config);
-            }
-            if let Ok(mut config) = serde_json::from_str::<Config>(&content) {
-                config.merge_macros();
-                return Ok(config);
+            tracing::trace!(path = %path.display(), "attempting exact path load");
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    // Try TOML first, then JSON
+                    if let Ok(mut config) = toml::from_str::<Config>(&content) {
+                        config.merge_macros();
+                        tracing::info!(
+                            path = %path.display(),
+                            icon_rules = config.icon_rules.len(),
+                            macros = config.macros.len(),
+                            elapsed_us = start.elapsed().as_micros(),
+                            "config loaded from exact path (TOML)"
+                        );
+                        return Ok(config);
+                    }
+                    if let Ok(mut config) = serde_json::from_str::<Config>(&content) {
+                        config.merge_macros();
+                        tracing::info!(
+                            path = %path.display(),
+                            icon_rules = config.icon_rules.len(),
+                            macros = config.macros.len(),
+                            elapsed_us = start.elapsed().as_micros(),
+                            "config loaded from exact path (JSON)"
+                        );
+                        return Ok(config);
+                    }
+                    tracing::warn!(
+                        path = %path.display(),
+                        elapsed_us = start.elapsed().as_micros(),
+                        "could not parse exact path as TOML or JSON"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to read exact path"
+                    );
+                }
             }
         }
 
+        tracing::info!(
+            path = %path.display(),
+            elapsed_us = start.elapsed().as_micros(),
+            "no config file found, using defaults"
+        );
         Ok(Config::default())
     }
 
@@ -482,13 +648,68 @@ impl Config {
     ///
     /// Always saves as TOML (migrating from JSON if needed).
     pub fn save(&self, path: &PathBuf) -> Result<()> {
+        let start = std::time::Instant::now();
         let toml_path = path.with_extension("toml");
+
+        tracing::debug!(
+            path = %toml_path.display(),
+            icon_rules = self.icon_rules.len(),
+            macros = self.macros.len(),
+            "saving config"
+        );
+
         if let Some(parent) = toml_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.exists() {
+                tracing::trace!(dir = %parent.display(), "creating parent directory");
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::error!(
+                        dir = %parent.display(),
+                        error = %e,
+                        elapsed_us = start.elapsed().as_micros(),
+                        "failed to create parent directory"
+                    );
+                    return Err(e.into());
+                }
+            }
         }
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(&toml_path, content)?;
-        tracing::debug!(path = %toml_path.display(), "Saved config to TOML");
+
+        let content = match toml::to_string_pretty(self) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    elapsed_us = start.elapsed().as_micros(),
+                    "failed to serialize config to TOML"
+                );
+                return Err(e.into());
+            }
+        };
+
+        tracing::trace!(
+            path = %toml_path.display(),
+            size_bytes = content.len(),
+            "writing config to file"
+        );
+
+        if let Err(e) = std::fs::write(&toml_path, &content) {
+            tracing::error!(
+                path = %toml_path.display(),
+                error = %e,
+                elapsed_us = start.elapsed().as_micros(),
+                "failed to write config file"
+            );
+            return Err(e.into());
+        }
+
+        tracing::info!(
+            path = %toml_path.display(),
+            size_bytes = content.len(),
+            icon_rules = self.icon_rules.len(),
+            macros = self.macros.len(),
+            elapsed_us = start.elapsed().as_micros(),
+            "config saved to TOML"
+        );
+
         Ok(())
     }
 

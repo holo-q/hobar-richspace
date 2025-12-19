@@ -13,6 +13,7 @@ use glib::Propagation;
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use crate::app::{AppEvent, AppState};
 use crate::config::WindowCountDisplay;
@@ -36,13 +37,27 @@ pub struct WorkspaceWidget {
 impl WorkspaceWidget {
     /// Create a new workspace widget
     pub fn new(state: &AppState, tx: glib::Sender<AppEvent>) -> Self {
+        let start = Instant::now();
+        tracing::debug!(
+            workspace_count = state.workspaces.len(),
+            orientation = ?state.orientation,
+            spacing = state.config.spacing,
+            "WorkspaceWidget::new BEGIN"
+        );
+
         let container = gtk::Box::new(state.orientation, state.config.spacing);
         container.style_context().add_class("richspace");
+        tracing::trace!("Container created");
 
         // Wrap in EventBox for scroll events
         let event_box = gtk::EventBox::new();
         event_box.add(&container);
         event_box.add_events(gdk::EventMask::SCROLL_MASK);
+        tracing::trace!(
+            scroll_enabled = state.config.scroll_enabled,
+            scroll_wrap = state.config.scroll_wrap,
+            "EventBox created with scroll support"
+        );
 
         let css_provider = gtk::CssProvider::new();
 
@@ -74,12 +89,18 @@ impl WorkspaceWidget {
             css_provider,
         };
 
+        tracing::trace!("Applying default CSS");
         // Apply default CSS with state for dynamic typography
         widget.apply_default_css(state);
 
+        tracing::trace!("Performing initial render");
         // Initial render
         widget.render(state);
 
+        tracing::debug!(
+            elapsed_us = start.elapsed().as_micros(),
+            "WorkspaceWidget::new END"
+        );
         widget
     }
 
@@ -120,6 +141,13 @@ impl WorkspaceWidget {
     /// 5. **Theme colors**: Use `@theme_fg_color`, `@theme_bg_color`, `@theme_selected_bg_color`
     ///    etc. to inherit from the user's GTK theme.
     fn apply_default_css(&self, state: &AppState) {
+        let start = Instant::now();
+        tracing::debug!(
+            has_custom_css = state.config.custom_css.is_some(),
+            button_padding = state.config.button_padding,
+            "apply_default_css BEGIN"
+        );
+
         // Build dynamic CSS based on config
         let mut css = String::from(r#"
         .richspace {
@@ -191,7 +219,9 @@ impl WorkspaceWidget {
         }
 
         /* Empty workspaces - more dimmed */
-        .richspace-button.empty .richspace-icon,
+        .richspace-button.empty .richspace-icon {
+            color: alpha(@theme_fg_color, 0.375);
+        }
         .richspace-button.empty .richspace-label {
             color: alpha(@theme_fg_color, 0.4);
         }
@@ -271,18 +301,33 @@ impl WorkspaceWidget {
 
         // Custom CSS from config (appended last to allow overrides)
         if let Some(ref custom) = state.config.custom_css {
+            tracing::trace!(
+                custom_css_len = custom.len(),
+                "Appending custom CSS"
+            );
             css.push_str("\n        /* Custom CSS */\n");
             css.push_str(custom);
             css.push('\n');
         }
 
+        tracing::trace!(
+            total_css_len = css.len(),
+            "CSS generation complete, loading into provider"
+        );
+
         // Load CSS - log errors prominently since GTK CSS fails silently on syntax errors
         // (e.g., @keyframes is not supported and will cause entire CSS to fail)
         if let Err(e) = self.css_provider.load_from_data(css.as_bytes()) {
-            tracing::error!("CSS parsing failed: {}", e);
-            tracing::error!("CSS content ({} bytes):\n{}", css.len(), css);
+            tracing::warn!(
+                error = %e,
+                css_len = css.len(),
+                "CSS parsing failed"
+            );
+            tracing::warn!("CSS content:\n{}", css);
             return;
         }
+
+        tracing::trace!("CSS loaded successfully, adding to style contexts");
 
         // Add provider directly to container's style context
         // Screen-wide CSS can be unreliable in panel plugins
@@ -298,7 +343,13 @@ impl WorkspaceWidget {
                 &self.css_provider,
                 gtk::STYLE_PROVIDER_PRIORITY_USER,
             );
+            tracing::trace!("CSS provider added to screen");
         }
+
+        tracing::debug!(
+            elapsed_us = start.elapsed().as_micros(),
+            "apply_default_css END"
+        );
     }
 
     /// Add CSS provider to a widget's style context
@@ -352,39 +403,93 @@ impl WorkspaceWidget {
     /// Use this when workspace list changes or provider connections change.
     /// For lighter updates (active workspace, animation), use update_active() or queue_redraw().
     pub fn render(&self, state: &AppState) {
+        let start = Instant::now();
+        tracing::debug!(
+            workspace_count = state.workspaces.len(),
+            provider_count = state.providers.providers.len(),
+            "render BEGIN"
+        );
+
         // Refresh CSS (supports live config reload for typography/padding)
+        let css_start = Instant::now();
         self.apply_default_css(state);
+        tracing::trace!(
+            elapsed_us = css_start.elapsed().as_micros(),
+            "CSS refresh complete"
+        );
 
         // Clear existing buttons
+        let clear_start = Instant::now();
+        let old_button_count = self.buttons.borrow().len();
         for child in self.container.children() {
             self.container.remove(&child);
         }
         self.buttons.borrow_mut().clear();
+        tracing::trace!(
+            elapsed_us = clear_start.elapsed().as_micros(),
+            removed_buttons = old_button_count,
+            "Cleared existing buttons"
+        );
 
         // Create buttons for each workspace
         // Provider dots are drawn INSIDE the button (integrated, not beside)
-        for ws in &state.workspaces {
+        let button_start = Instant::now();
+        for (idx, ws) in state.workspaces.iter().enumerate() {
             // Get provider render state if available
             let render_state = state.providers.get_render_state(ws.number).cloned();
+
+            tracing::trace!(
+                workspace = ws.number,
+                is_active = ws.is_active,
+                window_count = ws.window_count,
+                has_provider = render_state.is_some(),
+                "Creating button {}/{}",
+                idx + 1,
+                state.workspaces.len()
+            );
 
             // Create workspace button with optional provider dots inside
             let button = self.create_workspace_button(ws, state, render_state.as_ref());
             self.container.pack_start(&button, false, false, 0);
             self.buttons.borrow_mut().push(button);
         }
+        tracing::trace!(
+            elapsed_us = button_start.elapsed().as_micros(),
+            button_count = state.workspaces.len(),
+            "All buttons created"
+        );
 
         self.container.show_all();
+
+        tracing::debug!(
+            elapsed_us = start.elapsed().as_micros(),
+            workspace_count = state.workspaces.len(),
+            "render END"
+        );
     }
 
     /// Light update - just refresh CSS classes for active state
     ///
     /// Much faster than full render. Use for workspace switches.
     pub fn update_active(&self, state: &AppState) {
+        let start = Instant::now();
         let buttons = self.buttons.borrow();
+        tracing::debug!(
+            button_count = buttons.len(),
+            workspace_count = state.workspaces.len(),
+            "update_active BEGIN"
+        );
+
         for (i, button) in buttons.iter().enumerate() {
             let is_active = state.workspaces.get(i)
                 .map(|ws| ws.is_active)
                 .unwrap_or(false);
+
+            tracing::trace!(
+                workspace = i,
+                is_active = is_active,
+                "Updating active state"
+            );
 
             let ctx = button.style_context();
             if is_active {
@@ -393,6 +498,11 @@ impl WorkspaceWidget {
                 ctx.remove_class("active");
             }
         }
+
+        tracing::debug!(
+            elapsed_us = start.elapsed().as_micros(),
+            "update_active END"
+        );
     }
 
     /// Queue redraw on all widgets (for animation updates)
@@ -417,6 +527,15 @@ impl WorkspaceWidget {
         state: &AppState,
         render_state: Option<&RenderState>,
     ) -> gtk::Button {
+        let start = Instant::now();
+        tracing::trace!(
+            workspace = ws.number,
+            window_count = ws.window_count,
+            is_active = ws.is_active,
+            has_render_state = render_state.is_some(),
+            "create_workspace_button BEGIN"
+        );
+
         let button = gtk::Button::new();
         self.add_css_to_widget(&button);
         button.style_context().add_class("richspace-button");
@@ -445,13 +564,21 @@ impl WorkspaceWidget {
         }
 
         // Get display components
+        let display_start = Instant::now();
         let (icon, label_text) = self.get_workspace_display(ws, state);
+        tracing::trace!(
+            elapsed_us = display_start.elapsed().as_micros(),
+            has_icon = icon.is_some(),
+            has_label = label_text.is_some(),
+            "Display components retrieved"
+        );
 
         // Build button content
         let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         self.add_css_to_widget(&content_box);
 
         if let Some(icon_str) = icon {
+            tracing::trace!(icon = %icon_str, "Adding icon label");
             let icon_label = gtk::Label::new(Some(&icon_str));
             self.add_css_to_widget(&icon_label);
             icon_label.style_context().add_class("richspace-icon");
@@ -460,6 +587,7 @@ impl WorkspaceWidget {
         }
 
         if let Some(label_str) = label_text {
+            tracing::trace!(label = %label_str, "Adding text label");
             let label = gtk::Label::new(Some(&label_str));
             self.add_css_to_widget(&label);
             label.style_context().add_class("richspace-label");
@@ -494,6 +622,11 @@ impl WorkspaceWidget {
         if let Some(render_state) = render_state {
             let dot_count = render_state.dots.len();
             if dot_count > 0 {
+                tracing::trace!(
+                    workspace = ws.number,
+                    dot_count = dot_count,
+                    "Creating provider dots drawing area"
+                );
                 let drawing_area = gtk::DrawingArea::new();
                 // Each dot ~8px wide + 2px spacing
                 let width = (dot_count as i32 * 10).max(12);
@@ -541,6 +674,12 @@ impl WorkspaceWidget {
         // Tooltip
         let tooltip = self.get_workspace_tooltip(ws, state);
         button.set_tooltip_text(Some(&tooltip));
+
+        tracing::trace!(
+            workspace = ws.number,
+            elapsed_us = start.elapsed().as_micros(),
+            "create_workspace_button END"
+        );
 
         // Left-click handler - switch to workspace
         let tx = self.tx.clone();
@@ -617,9 +756,21 @@ impl WorkspaceWidget {
     /// 3. Icon rules (first matching rule wins)
     /// 4. Active vs default icon from config
     fn get_workspace_icon(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> Option<String> {
+        tracing::trace!(
+            workspace = ws.number,
+            window_count = ws.window_count,
+            window_classes_count = ws.window_classes.len(),
+            "get_workspace_icon BEGIN"
+        );
+
         // Check ephemeral state first (user explicitly set icon)
         if let Some(ws_state) = state.state.get(ws.number) {
             if let Some(ref icon) = ws_state.icon {
+                tracing::trace!(
+                    workspace = ws.number,
+                    icon = %icon,
+                    "Using ephemeral state icon"
+                );
                 return Some(icon.clone());
             }
         }
@@ -627,6 +778,11 @@ impl WorkspaceWidget {
         // Empty workspace icon
         if ws.window_count == 0 {
             if let Some(ref empty_icon) = state.config.empty_icon {
+                tracing::trace!(
+                    workspace = ws.number,
+                    icon = %empty_icon,
+                    "Using empty workspace icon"
+                );
                 return Some(empty_icon.clone());
             }
         }
@@ -640,7 +796,13 @@ impl WorkspaceWidget {
                 rule_count = state.config.icon_rules.len(),
                 "Evaluating icon rules"
             );
-            for rule in &state.config.icon_rules {
+            for (rule_idx, rule) in state.config.icon_rules.iter().enumerate() {
+                tracing::trace!(
+                    workspace = ws.number,
+                    rule_idx = rule_idx,
+                    rule_name = ?rule.name,
+                    "Testing icon rule"
+                );
                 if rule.matches(&ws.window_classes, &state.config.macros) {
                     tracing::info!(
                         workspace = ws.number,
@@ -655,11 +817,20 @@ impl WorkspaceWidget {
         }
 
         // Active vs default icon
-        if ws.is_active {
-            Some(state.config.active_icon.clone().unwrap_or_else(|| state.config.default_icon.clone()))
+        let icon = if ws.is_active {
+            state.config.active_icon.clone().unwrap_or_else(|| state.config.default_icon.clone())
         } else {
-            Some(state.config.default_icon.clone())
-        }
+            state.config.default_icon.clone()
+        };
+
+        tracing::trace!(
+            workspace = ws.number,
+            icon = %icon,
+            source = if ws.is_active { "active_icon" } else { "default_icon" },
+            "Using config icon"
+        );
+
+        Some(icon)
     }
 
     /// Get the display components for a workspace
