@@ -9,6 +9,7 @@ set shell := ["bash", "-c"]
 
 plugin_dir := "~/.local/lib/xfce4/panel/plugins"
 desktop_dir := "~/.local/share/xfce4/panel/plugins"
+workspace := env_var("HOME") + "/Workspace"
 
 # List recipes
 default:
@@ -35,25 +36,9 @@ link-release: release
         $(pkg-config --cflags --libs libxfce4panel-2.0 gtk+-3.0 libwnck-3.0)
 
 # Validate plugin .so has no unresolved xfce symbols
-# CRITICAL: Catches missing symbol errors BEFORE panel restart crashes
+# CRITICAL: dlopen() fails BEFORE any Rust code runs - catch at build time!
 validate-symbols:
-    #!/usr/bin/env bash
-    set -e
-    echo "Checking for undefined xfce symbols..."
-    plugin_syms=$(nm -D target/release/librichspace.so 2>/dev/null | grep "U xfce_panel" | awk '{print $2}')
-    lib_syms=$(nm -D /usr/lib/libxfce4panel-2.0.so.4 2>/dev/null | grep " T " | awk '{print $3}')
-    errors=""
-    for sym in $plugin_syms; do
-        if ! echo "$lib_syms" | grep -q "^${sym}$"; then
-            errors="$errors\n  $sym"
-        fi
-    done
-    if [ -n "$errors" ]; then
-        echo -e "ERROR: Undefined symbols not in libxfce4panel:$errors"
-        echo "The plugin will fail to load! Fix FFI bindings in src/xfce/ffi.rs"
-        exit 1
-    fi
-    echo "All xfce symbols resolved"
+    nu {{workspace}}/Lib/validate-xfce-plugin.nu target/release/librichspace.so
 
 # Full build (Rust + GCC link)
 full-debug: link-debug
