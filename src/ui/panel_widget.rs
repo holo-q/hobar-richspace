@@ -577,17 +577,19 @@ impl WorkspaceWidget {
         let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         self.add_css_to_widget(&content_box);
 
-        if let Some(icon_str) = icon {
-            tracing::trace!(icon = %icon_str, "Adding icon label");
+        // Build icon widget if present
+        let icon_widget = icon.map(|icon_str| {
+            tracing::trace!(icon = %icon_str, "Creating icon label");
             let icon_label = gtk::Label::new(Some(&icon_str));
             self.add_css_to_widget(&icon_label);
             icon_label.style_context().add_class("richspace-icon");
             icon_label.set_use_markup(true);
-            content_box.pack_start(&icon_label, false, false, 0);
-        }
+            icon_label
+        });
 
-        if let Some(label_str) = label_text {
-            tracing::trace!(label = %label_str, "Adding text label");
+        // Build label widget if present
+        let label_widget = label_text.map(|label_str| {
+            tracing::trace!(label = %label_str, "Creating text label");
             let label = gtk::Label::new(Some(&label_str));
             self.add_css_to_widget(&label);
             label.style_context().add_class("richspace-label");
@@ -595,7 +597,26 @@ impl WorkspaceWidget {
                 label.style_context().add_class("active");
             }
             label.set_use_markup(true);
-            content_box.pack_start(&label, false, false, 0);
+            label
+        });
+
+        // Pack in order based on icon_after_label config
+        if state.config.icon_after_label {
+            // Label first, then icon
+            if let Some(label) = label_widget {
+                content_box.pack_start(&label, false, false, 0);
+            }
+            if let Some(icon) = icon_widget {
+                content_box.pack_start(&icon, false, false, 0);
+            }
+        } else {
+            // Icon first, then label (default)
+            if let Some(icon) = icon_widget {
+                content_box.pack_start(&icon, false, false, 0);
+            }
+            if let Some(label) = label_widget {
+                content_box.pack_start(&label, false, false, 0);
+            }
         }
 
         // Window count display (Badge or Inline mode)
@@ -775,8 +796,15 @@ impl WorkspaceWidget {
             }
         }
 
-        // Empty workspace icon
+        // Empty workspace: hide icon entirely or show empty_icon
         if ws.window_count == 0 {
+            if state.config.hide_empty_icon {
+                tracing::trace!(
+                    workspace = ws.number,
+                    "Hiding icon for empty workspace (hide_empty_icon=true)"
+                );
+                return None;
+            }
             if let Some(ref empty_icon) = state.config.empty_icon {
                 tracing::trace!(
                     workspace = ws.number,
@@ -790,7 +818,8 @@ impl WorkspaceWidget {
         // Evaluate icon rules (first match wins)
         // Rules can reference macros (predefined class patterns) or raw regex
         if !ws.window_classes.is_empty() && !state.config.icon_rules.is_empty() {
-            tracing::debug!(
+            // TRACE not DEBUG: called for each workspace with windows on every render
+            tracing::trace!(
                 workspace = ws.number,
                 classes = ?ws.window_classes,
                 rule_count = state.config.icon_rules.len(),
@@ -804,7 +833,8 @@ impl WorkspaceWidget {
                     "Testing icon rule"
                 );
                 if rule.matches(&ws.window_classes, &state.config.macros) {
-                    tracing::info!(
+                    // TRACE not INFO: called on every render tick when animation is running
+                    tracing::trace!(
                         workspace = ws.number,
                         rule = ?rule.name,
                         icon = %rule.icon,

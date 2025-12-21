@@ -255,6 +255,15 @@ pub struct Config {
     #[serde(default)]
     pub empty_icon: Option<String>,
 
+    /// Hide icon entirely for empty workspaces (overrides empty_icon)
+    #[serde(default)]
+    pub hide_empty_icon: bool,
+
+    /// Display icon after label instead of before
+    /// Default: false (icon comes first, then label)
+    #[serde(default)]
+    pub icon_after_label: bool,
+
     // ─── Icon Rules ────────────────────────────────────────────────────────
     /// Auto-icon rules based on window classes
     ///
@@ -422,6 +431,8 @@ impl Default for Config {
             // Icons
             // 󰝣 = md-circle_outline - empty/no windows
             empty_icon: Some("󰝣".to_string()),
+            hide_empty_icon: false,
+            icon_after_label: false,
 
             // Icon rules (empty by default - user configures)
             icon_rules: Vec::new(),
