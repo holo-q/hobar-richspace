@@ -160,40 +160,38 @@ impl ProviderRegistry {
     }
 
     /// Check if any provider is animating (needs 60fps tick)
+    ///
+    /// HOT PATH: Called 60fps during animation. Must be fast.
+    /// Detailed logging only happens on state transitions.
     pub fn any_animating(&self) -> bool {
-        let animating = self.providers.values().any(|p| {
+        // Fast path: just check the flag, no collection building
+        self.providers.values().any(|p| {
             p.render_states.values().any(|s| s.animating)
-        });
+        })
+    }
 
-        if animating {
-            let animating_providers: Vec<_> = self.providers.iter()
-                .filter_map(|(id, p)| {
-                    let workspaces: Vec<_> = p.render_states.iter()
-                        .filter(|(_, s)| s.animating)
-                        .map(|(ws, _)| *ws)
-                        .collect();
-                    if workspaces.is_empty() {
-                        None
-                    } else {
-                        Some((id.clone(), workspaces))
-                    }
-                })
-                .collect();
-
-            tracing::trace!(
-                animating_providers = ?animating_providers,
-                "Providers with animating workspaces"
-            );
-        } else {
-            tracing::trace!("No providers animating");
-        }
-
-        animating
+    /// Get count of animating workspaces (for debug logging only)
+    #[allow(dead_code)]
+    pub fn animating_count(&self) -> usize {
+        self.providers.values()
+            .flat_map(|p| p.render_states.values())
+            .filter(|s| s.animating)
+            .count()
     }
 
     /// Handle provider event
+    ///
+    /// HOT PATH for RenderUpdate/SignalsUpdate: 60fps * workspace_count events
     pub fn handle_event(&mut self, event: ProviderEvent) {
-        tracing::debug!(event = ?event, "Handling provider event");
+        // Only log non-frequent events at debug; RenderUpdate/SignalsUpdate are too frequent
+        match &event {
+            ProviderEvent::Connected { .. } | ProviderEvent::Disconnected { .. } => {
+                tracing::debug!(event = ?event, "Handling provider event");
+            }
+            _ => {
+                tracing::trace!(event = ?event, "Handling provider event");
+            }
+        }
 
         match event {
             ProviderEvent::Connected { provider_id } => {
@@ -217,7 +215,8 @@ impl ProviderRegistry {
 
             ProviderEvent::RenderUpdate { provider_id, workspace, state } => {
                 if let Some(provider) = self.providers.get_mut(&provider_id) {
-                    tracing::debug!(
+                    // TRACE not DEBUG: 60fps * workspace_count events per second
+                    tracing::trace!(
                         provider = %provider_id,
                         workspace,
                         dots = state.dots.len(),
@@ -259,7 +258,8 @@ impl ProviderRegistry {
 
             ProviderEvent::SignalsUpdate { provider_id, workspace, signals } => {
                 if let Some(provider) = self.providers.get_mut(&provider_id) {
-                    tracing::debug!(
+                    // TRACE not DEBUG: signals can update frequently
+                    tracing::trace!(
                         provider = %provider_id,
                         workspace,
                         signals = ?signals,
@@ -433,8 +433,9 @@ async fn handle_connection(
             break;
         }
 
+        // TRACE not DEBUG: frequent when provider sends lots of data
         if read_elapsed.as_millis() > 10 {
-            tracing::debug!(
+            tracing::trace!(
                 connection_id,
                 provider_id = ?provider_id,
                 read_ms = read_elapsed.as_millis(),
@@ -477,7 +478,8 @@ async fn handle_connection(
             }
         };
 
-        tracing::debug!(
+        // TRACE not DEBUG: 720 messages/sec when provider animating (60fps * 12 workspaces)
+        tracing::trace!(
             connection_id,
             provider_id = ?provider_id,
             message = ?msg,
@@ -507,7 +509,8 @@ async fn handle_connection(
 
             ProviderMessage::Render { workspace, state } => {
                 if let Some(ref pid) = provider_id {
-                    tracing::debug!(
+                    // TRACE not DEBUG: 720 messages/sec when animating
+                    tracing::trace!(
                         connection_id,
                         provider_id = %pid,
                         workspace,
@@ -516,6 +519,7 @@ async fn handle_connection(
                         animating = state.animating,
                         "Render update"
                     );
+                    // Full state logged separately at even more verbose level
                     tracing::trace!(
                         connection_id,
                         provider_id = %pid,

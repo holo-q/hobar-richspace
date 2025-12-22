@@ -28,8 +28,6 @@ pub enum AppEvent {
     WorkspacesChanged,
     /// Active workspace changed
     ActiveWorkspaceChanged,
-    /// Window opened/closed (affects window counts)
-    WindowsChanged,
     /// State file changed (live reload)
     StateFileChanged,
     /// Config file changed (hot reload rules, icons, etc.)
@@ -231,20 +229,11 @@ impl App {
                 tx.send(AppEvent::WorkspacesChanged).ok();
             });
         }
-        {
-            let tx = tx.clone();
-            wnck::connect_window_opened(move || {
-                tracing::debug!("wnck: window_opened signal");
-                tx.send(AppEvent::WindowsChanged).ok();
-            });
-        }
-        {
-            let tx = tx.clone();
-            wnck::connect_window_closed(move || {
-                tracing::debug!("wnck: window_closed signal");
-                tx.send(AppEvent::WindowsChanged).ok();
-            });
-        }
+        // NOTE: We intentionally DON'T listen to window_opened/window_closed signals.
+        // These fire for every window map/unmap during workspace switches, causing
+        // massive signal spam (50+ events per switch). Instead, we refresh window
+        // info when active_workspace_changed fires - get_workspaces() fetches current
+        // window state for all workspaces anyway.
         tracing::debug!("wnck signals connected");
 
         // Connect panel signals
@@ -526,26 +515,26 @@ impl App {
         }
 
         match event {
-            AppEvent::WorkspacesChanged | AppEvent::WindowsChanged => {
-                // Refresh workspace info - full rebuild needed
+            AppEvent::WorkspacesChanged => {
+                // Refresh workspace info - full rebuild needed (workspace added/removed)
+                tracing::info!(trigger = "workspaces_changed", "SIGNAL IN - workspace count changed");
                 let t0 = Instant::now();
-                tracing::trace!("fetching workspaces");
                 self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
                 let t1 = Instant::now();
                 let ws_count = self.app_state.borrow().workspaces.len();
-                tracing::trace!(workspace_count = ws_count, "rendering widget");
                 self.widget.render(&self.app_state.borrow());
                 let t2 = Instant::now();
-                tracing::debug!(
+                tracing::info!(
                     workspace_count = ws_count,
                     get_workspaces_us = t1.duration_since(t0).as_micros(),
                     render_us = t2.duration_since(t1).as_micros(),
-                    "workspace/window change processed"
+                    "RENDER OUT - workspace count change handled"
                 );
             }
             AppEvent::ActiveWorkspaceChanged => {
                 // Light update - just refresh active state, no widget rebuild
                 // This is the fast path for workspace switching
+                tracing::info!(trigger = "active_workspace_changed", "SIGNAL IN - workspace switch");
                 let t0 = Instant::now();
                 self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
                 let t1 = Instant::now();
@@ -554,31 +543,38 @@ impl App {
                     .map(|ws| ws.number);
                 self.widget.update_active(&self.app_state.borrow());
                 let t2 = Instant::now();
-                tracing::debug!(
+                tracing::info!(
+                    trigger = "active_workspace_changed",
                     active_workspace = ?active,
                     get_workspaces_us = t1.duration_since(t0).as_micros(),
                     update_active_us = t2.duration_since(t1).as_micros(),
-                    "active workspace changed"
+                    "RENDER OUT - active state updated"
                 );
             }
             AppEvent::StateFileChanged => {
                 // Reload state from file
-                tracing::debug!("reloading state file");
+                tracing::info!(trigger = "state_file_changed", "SIGNAL IN - state file modified");
                 match State::load() {
                     Ok(new_state) => {
                         let ws_count = new_state.workspaces.len();
                         self.app_state.borrow_mut().state = new_state;
+                        let render_start = Instant::now();
                         self.widget.render(&self.app_state.borrow());
-                        tracing::info!(workspaces_with_state = ws_count, "state reloaded from file");
+                        tracing::info!(
+                            trigger = "state_file_changed",
+                            workspaces_with_state = ws_count,
+                            render_us = render_start.elapsed().as_micros(),
+                            "RENDER OUT - state reloaded"
+                        );
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "failed to reload state file");
+                        tracing::error!(trigger = "state_file_changed", error = %e, "failed to reload state file");
                     }
                 }
             }
             AppEvent::ConfigFileChanged => {
                 // Hot reload config (icon rules, macros, display settings)
-                tracing::debug!("hot-reloading config");
+                tracing::info!(trigger = "config_file_changed", "SIGNAL IN - config file modified");
                 if let Some(ref path) = self.app_state.borrow().config_path.clone() {
                     match Config::load(&path) {
                         Ok(new_config) => {
@@ -586,15 +582,19 @@ impl App {
                             self.app_state.borrow_mut().config = new_config;
                             // Refresh CSS first (config may change typography/padding)
                             self.widget.refresh_css(&self.app_state.borrow());
+                            let render_start = Instant::now();
                             self.widget.render(&self.app_state.borrow());
                             tracing::info!(
+                                trigger = "config_file_changed",
                                 path = %path.display(),
                                 icon_rules = rule_count,
-                                "config hot-reloaded"
+                                render_us = render_start.elapsed().as_micros(),
+                                "RENDER OUT - config reloaded"
                             );
                         }
                         Err(e) => {
                             tracing::error!(
+                                trigger = "config_file_changed",
                                 path = %path.display(),
                                 error = %e,
                                 "failed to reload config"
@@ -605,7 +605,6 @@ impl App {
             }
             AppEvent::ProviderUpdate(ref provider_event) => {
                 // Update provider registry
-                // No logging: provider sends 12 updates per frame * 60fps when animating
                 self.app_state.borrow_mut().providers.handle_event(provider_event.clone());
 
                 // Throttle full renders to 5fps (200ms interval)
@@ -615,8 +614,18 @@ impl App {
                 let elapsed = now.duration_since(self.last_provider_render);
                 if elapsed.as_millis() >= 200 {
                     self.last_provider_render = now;
-                    tracing::trace!("provider render (throttled to 5fps)");
+                    tracing::debug!(
+                        trigger = "provider_update",
+                        elapsed_since_last_ms = elapsed.as_millis(),
+                        "SIGNAL IN - provider throttle tick (5fps)"
+                    );
+                    let render_start = Instant::now();
                     self.widget.render(&self.app_state.borrow());
+                    tracing::debug!(
+                        trigger = "provider_update",
+                        render_us = render_start.elapsed().as_micros(),
+                        "RENDER OUT - provider render complete"
+                    );
                 }
 
                 // Start/stop animation tick based on provider state

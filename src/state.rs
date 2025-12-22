@@ -200,14 +200,11 @@ impl State {
     }
 
     /// Get state for a specific workspace
+    ///
+    /// HOT PATH: Called ~7 times per workspace per render = 84+ calls/render
+    /// No logging here - would flood at any render rate.
     pub fn get(&self, workspace_num: i32) -> Option<&WorkspaceState> {
-        let result = self.workspaces.get(&workspace_num.to_string());
-        tracing::debug!(
-            workspace = workspace_num,
-            found = result.is_some(),
-            "get workspace state"
-        );
-        result
+        self.workspaces.get(&workspace_num.to_string())
     }
 
     /// Set state for a specific workspace
