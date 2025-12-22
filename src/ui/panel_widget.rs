@@ -677,11 +677,11 @@ impl WorkspaceWidget {
                     for (i, dot) in render_state.dots.iter().enumerate() {
                         let x = start_x + i as f64 * spacing;
 
-                        // Pulse glow effect (outer ring)
-                        if dot.pulse > 0.01 {
-                            let glow_radius = dot_radius + dot.pulse as f64 * 3.0;
-                            ctx.set_source_rgba(dot.r, dot.g, dot.b, dot.pulse as f64 * 0.4);
-                            ctx.arc(x, center_y, glow_radius, 0.0, std::f64::consts::TAU);
+                        // Ring glow effect (animated during activity)
+                        if dot.ring_intensity > 0.01 {
+                            let ring_radius = dot_radius + dot.ring_intensity as f64 * 3.0;
+                            ctx.set_source_rgba(dot.r, dot.g, dot.b, dot.ring_intensity as f64 * 0.4);
+                            ctx.arc(x, center_y, ring_radius, 0.0, std::f64::consts::TAU);
                             ctx.fill().ok();
                         }
 

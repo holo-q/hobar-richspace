@@ -49,7 +49,7 @@ pub struct RenderState {
 /// A single dot to render
 ///
 /// Represents one "entity" (Claude session, browser tab, etc.) as a colored dot
-/// with optional pulse animation.
+/// with optional ring glow animation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderDot {
     /// X position (0.0-1.0, left to right)
@@ -67,10 +67,10 @@ pub struct RenderDot {
     /// Blue component (0.0-1.0)
     pub b: f64,
 
-    /// Current pulse intensity (0.0-1.0)
-    /// Creates a glow effect around the dot
-    #[serde(default)]
-    pub pulse: f64,
+    /// Ring glow intensity (0.0-1.0)
+    /// Animated glow effect around the dot during activity (token output)
+    #[serde(default, alias = "pulse")]
+    pub ring_intensity: f64,
 
     /// Dot radius as fraction of button height
     #[serde(default = "default_radius")]
@@ -90,7 +90,7 @@ impl RenderDot {
             r,
             g,
             b,
-            pulse: 0.0,
+            ring_intensity: 0.0,
             radius: default_radius(),
         }
     }
@@ -134,13 +134,13 @@ impl RenderState {
             let y = dot.y * height;
             let radius = dot.radius * height;
 
-            // Draw pulse glow (if any)
-            if dot.pulse > 0.01 {
-                let glow_radius = radius * (1.0 + dot.pulse * 0.5);
-                let glow_alpha = dot.pulse * 0.4;
+            // Draw ring glow (if any) - animated effect during activity
+            if dot.ring_intensity > 0.01 {
+                let ring_radius = radius * (1.0 + dot.ring_intensity * 0.5);
+                let ring_alpha = dot.ring_intensity * 0.4;
 
-                ctx.set_source_rgba(dot.r, dot.g, dot.b, glow_alpha);
-                ctx.arc(x, y, glow_radius, 0.0, TAU);
+                ctx.set_source_rgba(dot.r, dot.g, dot.b, ring_alpha);
+                ctx.arc(x, y, ring_radius, 0.0, TAU);
                 ctx.fill().ok();
             }
 
