@@ -667,28 +667,23 @@ impl WorkspaceWidget {
                     let width = widget.allocated_width() as f64;
                     let height = widget.allocated_height() as f64;
 
-                    // Draw dots - small filled circles like window indicators
+                    // Layout: position dots horizontally centered
                     let dot_radius = 3.0;
                     let spacing = 10.0;
                     let total_width = render_state.dots.len() as f64 * spacing;
                     let start_x = (width - total_width) / 2.0 + spacing / 2.0;
                     let center_y = height / 2.0;
 
+                    // Render each dot using shared cairo rendering from babel
                     for (i, dot) in render_state.dots.iter().enumerate() {
                         let x = start_x + i as f64 * spacing;
 
-                        // Ring glow effect (animated during activity)
-                        if dot.ring_intensity > 0.01 {
-                            let ring_radius = dot_radius + dot.ring_intensity as f64 * 3.0;
-                            ctx.set_source_rgba(dot.r, dot.g, dot.b, dot.ring_intensity as f64 * 0.4);
-                            ctx.arc(x, center_y, ring_radius, 0.0, std::f64::consts::TAU);
-                            ctx.fill().ok();
-                        }
-
-                        // Main dot (filled circle)
-                        ctx.set_source_rgb(dot.r, dot.g, dot.b);
-                        ctx.arc(x, center_y, dot_radius, 0.0, std::f64::consts::TAU);
-                        ctx.fill().ok();
+                        let style = spaceship_std::visual::DotStyle {
+                            color: spaceship_std::visual::Rgb::new(dot.r, dot.g, dot.b),
+                            ring_intensity: dot.ring_intensity,
+                            ..Default::default()
+                        };
+                        claude_babel::render::render_dot(ctx, x, center_y, dot_radius, &style);
                     }
 
                     glib::Propagation::Proceed

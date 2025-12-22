@@ -63,6 +63,9 @@ tracing-journald = "0.3"
 spaceship-std = { version = "0.1", path = "../../Lib/spaceship-std" }
 regex = "1.12.2"
 
+# Claude-babel for shared indicator rendering
+claude-babel = { path = "../../Daemons/claude-babel" }
+
 [build-dependencies]
 pkg-config = "0.3"
 cc = "1"
