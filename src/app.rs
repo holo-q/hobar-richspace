@@ -519,9 +519,9 @@ impl App {
     fn handle_event(&mut self, event: AppEvent) {
         let event_start = Instant::now();
 
-        // Pre-log for non-trace events (AnimationTick is too noisy)
-        let is_animation = matches!(event, AppEvent::AnimationTick);
-        if !is_animation {
+        // Skip logging for high-frequency events (720/sec when provider animating)
+        let is_frequent = matches!(event, AppEvent::AnimationTick | AppEvent::ProviderUpdate(_));
+        if !is_frequent {
             tracing::debug!(event = ?event, "handle_event BEGIN");
         }
 
@@ -584,6 +584,8 @@ impl App {
                         Ok(new_config) => {
                             let rule_count = new_config.icon_rules.len();
                             self.app_state.borrow_mut().config = new_config;
+                            // Refresh CSS first (config may change typography/padding)
+                            self.widget.refresh_css(&self.app_state.borrow());
                             self.widget.render(&self.app_state.borrow());
                             tracing::info!(
                                 path = %path.display(),
@@ -603,17 +605,17 @@ impl App {
             }
             AppEvent::ProviderUpdate(ref provider_event) => {
                 // Update provider registry
-                tracing::trace!(event = ?provider_event, "provider update");
+                // No logging: provider sends 12 updates per frame * 60fps when animating
                 self.app_state.borrow_mut().providers.handle_event(provider_event.clone());
 
-                // Throttle full renders to 20fps (50ms interval)
-                // Provider dots require widget rebuild, but 60fps is excessive for visual dots
-                // The animation tick handles smooth pulse decay via queue_redraw()
+                // Throttle full renders to 5fps (200ms interval)
+                // Provider dots require widget rebuild which is expensive (~50ms)
+                // Users don't need more than 5fps for status dots
                 let now = Instant::now();
                 let elapsed = now.duration_since(self.last_provider_render);
-                if elapsed.as_millis() >= 50 {
+                if elapsed.as_millis() >= 200 {
                     self.last_provider_render = now;
-                    tracing::trace!("provider render (throttled)");
+                    tracing::trace!("provider render (throttled to 5fps)");
                     self.widget.render(&self.app_state.borrow());
                 }
 
@@ -621,15 +623,16 @@ impl App {
                 self.update_animation_tick();
             }
             AppEvent::AnimationTick => {
-                // Called every 16ms when providers are animating
-                // Light update - just queue redraw, no widget rebuild
-                // Provider render state is already updated via ProviderUpdate events
-                self.widget.queue_redraw();
-                // Check if we should stop (no longer animating)
-                if !self.app_state.borrow().providers.any_animating() {
-                    self.stop_animation_tick();
-                }
-                // No logging - too noisy at 60fps
+                // DISABLED: Animation tick is useless with current architecture
+                // DrawingArea closures capture render state at creation time,
+                // so queue_redraw() just repaints with stale data.
+                // Provider render at 5fps is sufficient for status dots.
+                //
+                // TODO: To enable smooth animations:
+                // 1. Store render state in Rc<RefCell<RenderState>>
+                // 2. Have closures read from shared state on each draw
+                // 3. Then queue_redraw() would show updated state
+                self.stop_animation_tick();
             }
             AppEvent::OrientationChanged(orientation) => {
                 tracing::debug!(?orientation, "orientation changed");
@@ -721,9 +724,9 @@ impl App {
             }
         }
 
-        // Post-event timing for non-animation events
+        // Post-event timing - skip for high-frequency events
         let elapsed = event_start.elapsed();
-        if !is_animation {
+        if !is_frequent {
             if elapsed.as_millis() > 200 {
                 tracing::error!(
                     event = ?event,
@@ -774,21 +777,16 @@ impl App {
 
     /// Start/stop animation tick based on provider state
     ///
-    /// Called after provider updates to ensure 60fps rendering when needed.
-    /// 16ms interval = 60fps for smooth pulse animations.
+    /// DISABLED: Animation tick is ineffective with current architecture because
+    /// DrawingArea closures capture render state at creation time. queue_redraw()
+    /// just repaints with stale data. Provider render throttle at 5fps is sufficient.
+    ///
+    /// TODO: To re-enable smooth animations:
+    /// 1. Store render state in Rc<RefCell<RenderState>>
+    /// 2. Have DrawingArea closures read from shared state on each draw
     fn update_animation_tick(&mut self) {
-        let needs_animation = self.app_state.borrow().providers.any_animating();
-
-        if needs_animation && self.animation_source.is_none() {
-            // Start animation tick (16ms = 60fps)
-            let tx = self.tx.clone();
-            let source = glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-                tx.send(AppEvent::AnimationTick).ok();
-                glib::ControlFlow::Continue
-            });
-            self.animation_source = Some(source);
-            tracing::debug!("animation tick started");
-        } else if !needs_animation && self.animation_source.is_some() {
+        // Don't start animation tick - it's useless and wastes CPU
+        if self.animation_source.is_some() {
             self.stop_animation_tick();
         }
     }

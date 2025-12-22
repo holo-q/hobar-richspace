@@ -402,20 +402,15 @@ impl WorkspaceWidget {
     ///
     /// Use this when workspace list changes or provider connections change.
     /// For lighter updates (active workspace, animation), use update_active() or queue_redraw().
+    ///
+    /// NOTE: Does NOT regenerate CSS - call refresh_css() explicitly on config changes.
+    /// CSS regeneration is expensive (~2ms) and should only happen when config changes.
     pub fn render(&self, state: &AppState) {
         let start = Instant::now();
         tracing::debug!(
             workspace_count = state.workspaces.len(),
             provider_count = state.providers.providers.len(),
             "render BEGIN"
-        );
-
-        // Refresh CSS (supports live config reload for typography/padding)
-        let css_start = Instant::now();
-        self.apply_default_css(state);
-        tracing::trace!(
-            elapsed_us = css_start.elapsed().as_micros(),
-            "CSS refresh complete"
         );
 
         // Clear existing buttons
@@ -510,6 +505,19 @@ impl WorkspaceWidget {
     /// Triggers repaint without rebuilding widgets.
     pub fn queue_redraw(&self) {
         self.container.queue_draw();
+    }
+
+    /// Refresh CSS styles from config
+    ///
+    /// Call this when config changes (typography, padding, custom_css).
+    /// Expensive (~2ms) - don't call on every render.
+    pub fn refresh_css(&self, state: &AppState) {
+        let start = Instant::now();
+        self.apply_default_css(state);
+        tracing::debug!(
+            elapsed_us = start.elapsed().as_micros(),
+            "CSS refreshed"
+        );
     }
 
     /// Create a button for a workspace
