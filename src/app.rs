@@ -673,6 +673,8 @@ impl App {
                 tracing::debug!(?orientation, "orientation changed");
                 self.app_state.borrow_mut().orientation = orientation;
                 self.widget.set_orientation(orientation);
+                // Rebuild positions for new axis (Fixed needs repositioning)
+                self.widget.rebuild(&self.app_state.borrow());
             }
             AppEvent::SizeChanged(size) => {
                 tracing::debug!(size, "size changed");
@@ -776,8 +778,8 @@ impl App {
                         }
                         drop(state);
                         // TODO Phase 7: if config.true_reorder, swap window contents here
-                        // Re-render with animation
-                        self.widget.render(&self.app_state.borrow());
+                        // Animate buttons to new positions
+                        self.widget.reorder_animate(&self.app_state.borrow());
                         tracing::info!(direction, active_ws = active, "RENDER OUT - workspace reordered");
                     } else {
                         tracing::debug!(direction, pos, "reorder clamped at boundary");
@@ -803,7 +805,7 @@ impl App {
                 }
                 drop(state);
                 // TODO Phase 7: if config.true_reorder, swap window contents
-                self.widget.render(&self.app_state.borrow());
+                self.widget.reorder_animate(&self.app_state.borrow());
                 tracing::info!(from_pos, to_pos, "RENDER OUT - workspace reordered (drag)");
             }
             AppEvent::Configure => {

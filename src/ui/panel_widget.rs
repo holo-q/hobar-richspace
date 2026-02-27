@@ -11,10 +11,16 @@
 //! | Update Type | When | Cost |
 //! |-------------|------|------|
 //! | `rebuild()` | Workspace count changes | ~10ms (full widget creation) |
+//! | `reorder_animate()` | Display order changed | ~0.5ms (reposition + animation) |
 //! | `update_state()` | Active workspace / CSS class changes | ~0.1ms |
 //! | `update_dots()` | Provider animation tick | ~0.01ms (just queue_draw) |
 //!
-//! This enables 60fps dot animations while keeping CPU usage minimal.
+//! ## Animation
+//!
+//! Uses gtk::Fixed for manual button positioning, enabling smooth animated
+//! transitions when workspaces are reordered. The AnimationEngine uses
+//! exponential ease-out interpolation that's spam-safe (retargetable mid-flight)
+//! and frame-rate independent.
 
 use gdk;
 use glib::prelude::IsA;
@@ -22,11 +28,12 @@ use glib::Propagation;
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::{AppEvent, AppState};
 use crate::config::WindowCountDisplay;
 use crate::providers::RenderState;
+use super::animation::AnimationEngine;
 use super::context_menu::build_workspace_menu;
 
 /// Persistent state for a single workspace button
@@ -45,17 +52,22 @@ struct ButtonState {
     drawing_area: gtk::DrawingArea,
     /// Shared render state for dot animation - mutate this, then queue_draw()
     render_state: Rc<RefCell<Option<RenderState>>>,
-    /// Workspace number this button represents
+    /// X11 workspace number this button represents
     workspace_number: i32,
+    /// Display position (index in visual order, not workspace number)
+    display_position: usize,
 }
 
 /// Main workspace widget
+///
+/// Uses gtk::Fixed for manual button positioning, enabling animated
+/// transitions when workspaces are reordered via keyboard or drag-and-drop.
 pub struct WorkspaceWidget {
     /// Outer event box (for scroll events)
     event_box: gtk::EventBox,
-    /// Inner container
-    container: gtk::Box,
-    /// Persistent button state - reused across updates
+    /// Inner container — gtk::Fixed for manual positioning (enables animation)
+    container: gtk::Fixed,
+    /// Persistent button state - reused across updates, sorted by display_position
     buttons: Rc<RefCell<Vec<ButtonState>>>,
     /// Event sender for click handling
     tx: glib::Sender<AppEvent>,
@@ -71,6 +83,13 @@ pub struct WorkspaceWidget {
     /// smooth 60fps animation without IPC overhead. Babel sends raw intensity on
     /// ActivityPulse events, richspace decays it frame by frame.
     last_frame: Rc<RefCell<Instant>>,
+    /// Animation engine for smooth position transitions on reorder
+    animation: Rc<RefCell<AnimationEngine>>,
+    /// Current panel orientation (cached for position calculations)
+    orientation: RefCell<gtk::Orientation>,
+    /// Active animation tick source — runs at ~60fps during position animation only
+    /// Rc<RefCell> because the tick closure needs to clear itself on settle
+    animation_tick: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl WorkspaceWidget {
@@ -84,7 +103,7 @@ impl WorkspaceWidget {
             "WorkspaceWidget::new BEGIN"
         );
 
-        let container = gtk::Box::new(state.orientation, state.config.spacing);
+        let container = gtk::Fixed::new();
         container.style_context().add_class("richspace");
 
         // Wrap in EventBox for scroll events
@@ -123,6 +142,9 @@ impl WorkspaceWidget {
             last_rebuild: RefCell::new(Instant::now()),
             cached_workspace_count: RefCell::new(0),
             last_frame: Rc::new(RefCell::new(Instant::now())),
+            animation: Rc::new(RefCell::new(AnimationEngine::new())),
+            orientation: RefCell::new(state.orientation),
+            animation_tick: Rc::new(RefCell::new(None)),
         };
 
         // Apply CSS
@@ -143,9 +165,10 @@ impl WorkspaceWidget {
         &self.event_box
     }
 
-    /// Set orientation
+    /// Set orientation — recalculates button positions
     pub fn set_orientation(&self, orientation: gtk::Orientation) {
-        self.container.set_orientation(orientation);
+        *self.orientation.borrow_mut() = orientation;
+        // Positions will be recalculated on next render
     }
 
     // =========================================================================
@@ -157,6 +180,8 @@ impl WorkspaceWidget {
     /// Automatically chooses the cheapest update path:
     /// - Workspace count changed → rebuild()
     /// - Otherwise → update_state()
+    ///
+    /// For reorder animation, call reorder_animate() directly instead.
     pub fn render(&self, state: &AppState) {
         let start = Instant::now();
         let current_count = state.workspaces.len();
@@ -182,15 +207,21 @@ impl WorkspaceWidget {
     ///
     /// EXPENSIVE (~10ms) - Only call when workspace COUNT changes.
     /// For state updates, use update_state() instead.
+    /// For reorder animation, use reorder_animate() instead.
     pub fn rebuild(&self, state: &AppState) {
         let start = Instant::now();
         *self.last_rebuild.borrow_mut() = start;
         *self.cached_workspace_count.borrow_mut() = state.workspaces.len();
 
+        let display_order = state.state.effective_display_order(state.workspaces.len());
         tracing::debug!(
             workspace_count = state.workspaces.len(),
+            display_order = ?display_order,
             "rebuild BEGIN"
         );
+
+        // Stop any running animation
+        self.stop_animation_tick();
 
         // Clear existing buttons
         for child in self.container.children() {
@@ -198,13 +229,45 @@ impl WorkspaceWidget {
         }
         self.buttons.borrow_mut().clear();
 
-        // Create buttons for each workspace
-        for ws in state.workspaces.iter() {
-            let render_state = state.providers.get_render_state(ws.number).cloned();
-            let button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone());
-            self.container.pack_start(&button_state.button, false, false, 0);
-            self.buttons.borrow_mut().push(button_state);
+        // Build a map from workspace number to WorkspaceInfo for quick lookup
+        let ws_map: std::collections::HashMap<i32, &crate::wnck::WorkspaceInfo> =
+            state.workspaces.iter().map(|ws| (ws.number, ws)).collect();
+
+        // Create buttons in display order and measure widths
+        let orientation = *self.orientation.borrow();
+        let spacing = state.config.spacing as f64;
+        let mut widths: Vec<f64> = Vec::new();
+        let mut new_buttons: Vec<ButtonState> = Vec::new();
+
+        for (display_pos, &ws_num) in display_order.iter().enumerate() {
+            if let Some(ws) = ws_map.get(&ws_num) {
+                let render_state = state.providers.get_render_state(ws.number).cloned();
+                let mut button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone());
+                button_state.display_position = display_pos;
+
+                // Measure preferred size before adding to container
+                // GTK computes natural size from widget content (labels, padding, CSS)
+                let width = if orientation == gtk::Orientation::Horizontal {
+                    let (_, natural) = button_state.button.preferred_width();
+                    natural.max(1) as f64  // Sanity: at least 1px
+                } else {
+                    let (_, natural) = button_state.button.preferred_height();
+                    natural.max(1) as f64
+                };
+                widths.push(width);
+
+                // Add to container at (0,0) initially — position_buttons will fix it
+                self.container.put(&button_state.button, 0, 0);
+                new_buttons.push(button_state);
+            }
         }
+
+        *self.buttons.borrow_mut() = new_buttons;
+
+        // Calculate positions and apply instantly (no animation on rebuild)
+        let positions = AnimationEngine::compute_positions(&widths, spacing);
+        self.animation.borrow_mut().set_targets(&positions, true);
+        self.apply_positions(state);
 
         self.container.show_all();
 
@@ -215,84 +278,209 @@ impl WorkspaceWidget {
         );
     }
 
+    /// Animate workspace buttons to new display order positions
+    ///
+    /// Called when display_order changes (reorder event). Does NOT recreate widgets —
+    /// just reorders the buttons vec, recalculates target positions, and starts
+    /// the animation tick. Buttons slide smoothly to their new positions.
+    ///
+    /// FAST (~0.5ms) + animation frames at 60fps until settled.
+    pub fn reorder_animate(&self, state: &AppState) {
+        let start = Instant::now();
+        let display_order = state.state.effective_display_order(state.workspaces.len());
+
+        tracing::debug!(
+            display_order = ?display_order,
+            "reorder_animate BEGIN"
+        );
+
+        let orientation = *self.orientation.borrow();
+        let spacing = state.config.spacing as f64;
+
+        // Reorder buttons vec to match new display order
+        let mut buttons = self.buttons.borrow_mut();
+
+        // Build ws_num → button index map
+        let mut ws_to_idx: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        for (i, bs) in buttons.iter().enumerate() {
+            ws_to_idx.insert(bs.workspace_number, i);
+        }
+
+        // Build new order (indices into current buttons vec)
+        let new_indices: Vec<usize> = display_order.iter()
+            .filter_map(|&ws_num| ws_to_idx.get(&ws_num).copied())
+            .collect();
+
+        // Safety: if counts don't match, fall back to rebuild
+        if new_indices.len() != buttons.len() {
+            tracing::warn!(
+                expected = buttons.len(),
+                got = new_indices.len(),
+                "reorder_animate: count mismatch, falling back to rebuild"
+            );
+            drop(buttons);
+            self.rebuild(state);
+            return;
+        }
+
+        // Reorder in-place using a temporary vec
+        let old_buttons: Vec<ButtonState> = buttons.drain(..).collect();
+        for (new_pos, &old_idx) in new_indices.iter().enumerate() {
+            // Move from old vec (we can't use index twice, so this is safe
+            // because new_indices is a permutation)
+            // ... but drain() consumed old_buttons. We need a different approach.
+            let _ = new_pos; // suppress warning
+            let _ = old_idx;
+        }
+        // Actually, drain + reinsert by index:
+        // Since old_buttons is consumed, let's use a swap-based approach
+        // Rebuild buttons vec in new order
+        // old_buttons is Vec<ButtonState>, new_indices is Vec<usize>
+        // We need buttons[i] = old_buttons[new_indices[i]]
+        // But Vec doesn't support out-of-order reinsertion easily.
+        // Use unsafe-free approach: sort by new position.
+
+        // Simpler: we already drained. Reinsert in order.
+        // new_indices[i] = the old index that should be at position i
+        // We need to consume old_buttons in order of new_indices.
+
+        // Problem: can't index into old_buttons multiple times after drain.
+        // Solution: convert to Option vec and take() each entry.
+        let mut old_options: Vec<Option<ButtonState>> = old_buttons.into_iter().map(Some).collect();
+        for (new_pos, &old_idx) in new_indices.iter().enumerate() {
+            if let Some(mut bs) = old_options[old_idx].take() {
+                bs.display_position = new_pos;
+                buttons.push(bs);
+            }
+        }
+
+        // Measure widths and calculate new target positions
+        let widths: Vec<f64> = buttons.iter().map(|bs| {
+            if orientation == gtk::Orientation::Horizontal {
+                let (_, natural) = bs.button.preferred_width();
+                natural.max(1) as f64
+            } else {
+                let (_, natural) = bs.button.preferred_height();
+                natural.max(1) as f64
+            }
+        }).collect();
+
+        let positions = AnimationEngine::compute_positions(&widths, spacing);
+        drop(buttons);
+
+        // Set animated targets (don't snap — let them slide)
+        self.animation.borrow_mut().set_targets(&positions, false);
+
+        // Update container size request
+        let total = self.animation.borrow().total_extent(spacing);
+        if orientation == gtk::Orientation::Horizontal {
+            self.container.set_size_request(total.ceil() as i32, state.size);
+        } else {
+            self.container.set_size_request(state.size, total.ceil() as i32);
+        }
+
+        // Start animation tick
+        self.start_animation_tick();
+
+        // Also update button state (CSS classes, labels, etc.)
+        self.update_state_inner(state);
+
+        tracing::debug!(
+            elapsed_us = start.elapsed().as_micros(),
+            "reorder_animate END — animation started"
+        );
+    }
+
     /// Update state - refreshes CSS classes, icon/label text, and dots
     ///
     /// CHEAP (~0.1ms) - Use for active workspace changes, rule matches, urgency, etc.
+    /// Matches buttons by workspace_number (display-order-safe).
     pub fn update_state(&self, state: &AppState) {
+        self.update_state_inner(state);
+    }
+
+    /// Inner update_state implementation (avoids borrow issues when called from reorder_animate)
+    fn update_state_inner(&self, state: &AppState) {
         let start = Instant::now();
         let buttons = self.buttons.borrow();
 
-        for (i, bs) in buttons.iter().enumerate() {
-            if let Some(ws) = state.workspaces.get(i) {
-                // Update CSS classes
-                let ctx = bs.button.style_context();
+        // Build workspace lookup map
+        let ws_map: std::collections::HashMap<i32, &crate::wnck::WorkspaceInfo> =
+            state.workspaces.iter().map(|ws| (ws.number, ws)).collect();
 
-                // Active state
+        for bs in buttons.iter() {
+            let Some(ws) = ws_map.get(&bs.workspace_number) else {
+                continue;
+            };
+
+            // Update CSS classes
+            let ctx = bs.button.style_context();
+
+            // Active state
+            if ws.is_active {
+                ctx.add_class("active");
+            } else {
+                ctx.remove_class("active");
+            }
+
+            // Window count state
+            if ws.window_count > 0 {
+                ctx.add_class("has-windows");
+                ctx.remove_class("empty");
+            } else {
+                ctx.remove_class("has-windows");
+                ctx.add_class("empty");
+            }
+
+            // Urgency from state file
+            if let Some(ws_state) = state.state.get(ws.number) {
+                if ws_state.urgent.unwrap_or(false) {
+                    ctx.add_class("urgent");
+                } else {
+                    ctx.remove_class("urgent");
+                }
+
+                // Custom CSS class
+                if let Some(ref css_class) = ws_state.css_class {
+                    ctx.add_class(css_class);
+                }
+            }
+
+            // Update icon and label text (for rule changes, custom labels, etc.)
+            let (icon_text, label_text) = self.get_workspace_display(ws, state);
+
+            if let Some(ref icon_label) = bs.icon {
+                if let Some(text) = icon_text {
+                    icon_label.set_markup(&text);
+                }
+            }
+
+            if let Some(ref label) = bs.label {
+                if let Some(text) = label_text {
+                    label.set_markup(&text);
+                }
+                // Update label active state CSS
+                let label_ctx = label.style_context();
                 if ws.is_active {
-                    ctx.add_class("active");
+                    label_ctx.add_class("active");
                 } else {
-                    ctx.remove_class("active");
+                    label_ctx.remove_class("active");
                 }
+            }
 
-                // Window count state
-                if ws.window_count > 0 {
-                    ctx.add_class("has-windows");
-                    ctx.remove_class("empty");
-                } else {
-                    ctx.remove_class("has-windows");
-                    ctx.add_class("empty");
-                }
+            // Update tooltip
+            let tooltip = self.get_workspace_tooltip(ws, state);
+            bs.button.set_tooltip_text(Some(&tooltip));
 
-                // Urgency from state file
-                if let Some(ws_state) = state.state.get(ws.number) {
-                    if ws_state.urgent.unwrap_or(false) {
-                        ctx.add_class("urgent");
-                    } else {
-                        ctx.remove_class("urgent");
-                    }
+            // Update render state for dots and queue redraw
+            if let Some(render_state) = state.providers.get_render_state(ws.number) {
+                // Update size if dot count changed
+                let new_dot_count = render_state.dots.len();
+                let width = if new_dot_count > 0 { (new_dot_count as i32 * 10).max(12) } else { 0 };
+                bs.drawing_area.set_size_request(width, state.size.max(16));
 
-                    // Custom CSS class
-                    if let Some(ref css_class) = ws_state.css_class {
-                        ctx.add_class(css_class);
-                    }
-                }
-
-                // Update icon and label text (for rule changes, custom labels, etc.)
-                let (icon_text, label_text) = self.get_workspace_display(ws, state);
-
-                if let Some(ref icon_label) = bs.icon {
-                    if let Some(text) = icon_text {
-                        icon_label.set_markup(&text);
-                    }
-                }
-
-                if let Some(ref label) = bs.label {
-                    if let Some(text) = label_text {
-                        label.set_markup(&text);
-                    }
-                    // Update label active state CSS
-                    let label_ctx = label.style_context();
-                    if ws.is_active {
-                        label_ctx.add_class("active");
-                    } else {
-                        label_ctx.remove_class("active");
-                    }
-                }
-
-                // Update tooltip
-                let tooltip = self.get_workspace_tooltip(ws, state);
-                bs.button.set_tooltip_text(Some(&tooltip));
-
-                // Update render state for dots and queue redraw
-                if let Some(render_state) = state.providers.get_render_state(ws.number) {
-                    // Update size if dot count changed
-                    let new_dot_count = render_state.dots.len();
-                    let width = if new_dot_count > 0 { (new_dot_count as i32 * 10).max(12) } else { 0 };
-                    bs.drawing_area.set_size_request(width, state.size.max(16));
-
-                    *bs.render_state.borrow_mut() = Some(render_state.clone());
-                    bs.drawing_area.queue_draw();
-                }
+                *bs.render_state.borrow_mut() = Some(render_state.clone());
+                bs.drawing_area.queue_draw();
             }
         }
 
@@ -306,16 +494,15 @@ impl WorkspaceWidget {
     /// Update dots only - just mutates render state and queues redraw
     ///
     /// VERY CHEAP (~0.01ms) - Use for 60fps dot animations.
+    /// Matches buttons by workspace_number (display-order-safe).
     pub fn update_dots(&self, state: &AppState) {
         let start = Instant::now();
         let buttons = self.buttons.borrow();
 
-        for (i, bs) in buttons.iter().enumerate() {
-            if let Some(ws) = state.workspaces.get(i) {
-                if let Some(render_state) = state.providers.get_render_state(ws.number) {
-                    *bs.render_state.borrow_mut() = Some(render_state.clone());
-                    bs.drawing_area.queue_draw();
-                }
+        for bs in buttons.iter() {
+            if let Some(render_state) = state.providers.get_render_state(bs.workspace_number) {
+                *bs.render_state.borrow_mut() = Some(render_state.clone());
+                bs.drawing_area.queue_draw();
             }
         }
 
@@ -345,6 +532,103 @@ impl WorkspaceWidget {
             elapsed_us = start.elapsed().as_micros(),
             "CSS refreshed"
         );
+    }
+
+    // =========================================================================
+    // ANIMATION - Position management for gtk::Fixed
+    // =========================================================================
+
+    /// Apply current animation positions to buttons in the Fixed container
+    fn apply_positions(&self, state: &AppState) {
+        let buttons = self.buttons.borrow();
+        let anim = self.animation.borrow();
+        let orientation = *self.orientation.borrow();
+
+        for (i, bs) in buttons.iter().enumerate() {
+            if let Some(anim_state) = anim.buttons.get(i) {
+                let pos = anim_state.current.round() as i32;
+                if orientation == gtk::Orientation::Horizontal {
+                    self.container.move_(&bs.button, pos, 0);
+                } else {
+                    self.container.move_(&bs.button, 0, pos);
+                }
+            }
+        }
+
+        // Update container size request based on total extent
+        let spacing = state.config.spacing as f64;
+        let total = anim.total_extent(spacing).ceil() as i32;
+        if orientation == gtk::Orientation::Horizontal {
+            self.container.set_size_request(total, state.size);
+        } else {
+            self.container.set_size_request(state.size, total);
+        }
+    }
+
+    /// Start the animation tick (60fps position updates)
+    ///
+    /// Runs until all buttons have settled, then stops automatically.
+    /// Safe to call multiple times — will not create duplicate ticks.
+    fn start_animation_tick(&self) {
+        // Don't start if already running
+        if self.animation_tick.borrow().is_some() {
+            return;
+        }
+
+        let animation = self.animation.clone();
+        let buttons = self.buttons.clone();
+        let container = self.container.clone();
+        let orientation = self.orientation.clone();
+        let animation_tick = self.animation_tick.clone();
+        let last_tick = Rc::new(RefCell::new(Instant::now()));
+
+        let source = glib::timeout_add_local(Duration::from_millis(16), move || {
+            let now = Instant::now();
+            let dt = {
+                let mut last = last_tick.borrow_mut();
+                let dt = now.duration_since(*last).as_secs_f64();
+                *last = now;
+                // Clamp dt to avoid huge jumps after stalls (e.g., system suspend)
+                dt.min(0.1)
+            };
+
+            let still_animating = animation.borrow_mut().tick(dt);
+
+            // Apply positions to Fixed container
+            let btns = buttons.borrow();
+            let anim = animation.borrow();
+            let orient = *orientation.borrow();
+            for (i, bs) in btns.iter().enumerate() {
+                if let Some(anim_state) = anim.buttons.get(i) {
+                    let pos = anim_state.current.round() as i32;
+                    if orient == gtk::Orientation::Horizontal {
+                        container.move_(&bs.button, pos, 0);
+                    } else {
+                        container.move_(&bs.button, 0, pos);
+                    }
+                }
+            }
+
+            if still_animating {
+                glib::ControlFlow::Continue
+            } else {
+                // Animation settled — clear the source ID
+                *animation_tick.borrow_mut() = None;
+                tracing::debug!("reorder animation settled");
+                glib::ControlFlow::Break
+            }
+        });
+
+        *self.animation_tick.borrow_mut() = Some(source);
+        tracing::debug!("reorder animation tick started");
+    }
+
+    /// Stop the animation tick if running
+    fn stop_animation_tick(&self) {
+        if let Some(source) = self.animation_tick.borrow_mut().take() {
+            source.remove();
+            tracing::debug!("reorder animation tick stopped");
+        }
     }
 
     // =========================================================================
@@ -500,8 +784,8 @@ impl WorkspaceWidget {
                         }
 
                         let x = start_x + i as f64 * spacing;
-                        let style = spaceship_std::visual::DotStyle {
-                            color: spaceship_std::visual::Rgb::new(dot.r, dot.g, dot.b),
+                        let style = claude_babel::DotStyle {
+                            color: claude_babel::Rgb::new(dot.r, dot.g, dot.b),
                             ring_intensity: dot.ring_intensity,
                             ..Default::default()
                         };
@@ -594,6 +878,7 @@ impl WorkspaceWidget {
             drawing_area,
             render_state: shared_render_state,
             workspace_number: ws.number,
+            display_position: 0, // Set by caller
         }
     }
 
