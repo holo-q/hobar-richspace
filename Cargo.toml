@@ -60,7 +60,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-journald = "0.3"
 
 # Spaceship shared logging infrastructure
-spaceship-std = { version = "0.1", path = "../../Lib/spaceship-std" }
+spaceship-std = { version = "0.2", path = "../../Lib/spaceship-std" }
 regex = "1.12.2"
 
 # Claude-babel for shared indicator rendering

@@ -280,6 +280,38 @@ impl State {
         self.version += 1;
     }
 
+    /// Swap ephemeral state (labels, icons, CSS classes, urgent) between two workspaces.
+    ///
+    /// Used by true_reorder: when windows move between workspaces, their customizations
+    /// should follow. After this call, workspace A has B's labels/icons and vice versa.
+    pub fn swap_ephemeral(&mut self, ws_a: i32, ws_b: i32) {
+        if ws_a == ws_b {
+            return;
+        }
+        let key_a = ws_a.to_string();
+        let key_b = ws_b.to_string();
+
+        let state_a = self.workspaces.remove(&key_a);
+        let state_b = self.workspaces.remove(&key_b);
+
+        tracing::debug!(
+            ws_a, ws_b,
+            a_had_state = state_a.is_some(),
+            b_had_state = state_b.is_some(),
+            "swap_ephemeral"
+        );
+
+        // Cross-insert: A's state goes to B's key, B's state goes to A's key
+        if let Some(s) = state_a {
+            self.workspaces.insert(key_b, s);
+        }
+        if let Some(s) = state_b {
+            self.workspaces.insert(key_a, s);
+        }
+
+        self.version += 1;
+    }
+
     /// Get effective display order, falling back to identity if empty or stale.
     /// Always returns exactly `workspace_count` entries.
     pub fn effective_display_order(&self, workspace_count: usize) -> Vec<i32> {
@@ -536,5 +568,52 @@ mod tests {
         assert_eq!(state.display_position_of(3), Some(0));
         assert_eq!(state.display_position_of(0), Some(2));
         assert_eq!(state.display_position_of(5), None);
+    }
+
+    #[test]
+    fn test_swap_ephemeral_both_have_state() {
+        let mut state = State::default();
+        state.set(0, WorkspaceState {
+            label: Some("Home".to_string()),
+            icon: Some("H".to_string()),
+            ..Default::default()
+        });
+        state.set(1, WorkspaceState {
+            label: Some("Code".to_string()),
+            icon: Some("C".to_string()),
+            ..Default::default()
+        });
+        let v_before = state.version;
+        state.swap_ephemeral(0, 1);
+        assert_eq!(state.get(0).unwrap().label, Some("Code".to_string()));
+        assert_eq!(state.get(0).unwrap().icon, Some("C".to_string()));
+        assert_eq!(state.get(1).unwrap().label, Some("Home".to_string()));
+        assert_eq!(state.get(1).unwrap().icon, Some("H".to_string()));
+        assert!(state.version > v_before);
+    }
+
+    #[test]
+    fn test_swap_ephemeral_one_empty() {
+        let mut state = State::default();
+        state.set(0, WorkspaceState {
+            label: Some("Home".to_string()),
+            ..Default::default()
+        });
+        // Workspace 1 has no state
+        state.swap_ephemeral(0, 1);
+        assert!(state.get(0).is_none()); // Was empty, stays empty (no entry)
+        assert_eq!(state.get(1).unwrap().label, Some("Home".to_string()));
+    }
+
+    #[test]
+    fn test_swap_ephemeral_noop_same() {
+        let mut state = State::default();
+        state.set(0, WorkspaceState {
+            label: Some("Home".to_string()),
+            ..Default::default()
+        });
+        let v_before = state.version;
+        state.swap_ephemeral(0, 0);
+        assert_eq!(state.version, v_before); // No version bump for noop
     }
 }

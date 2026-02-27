@@ -205,3 +205,76 @@ pub fn connect_window_closed<F: Fn() + 'static>(f: F) {
         tracing::error!("connect_window_closed - no default screen available");
     }
 }
+
+/// Swap all windows between two workspaces (true reorder).
+///
+/// Moves all non-sticky windows from ws_a to ws_b and vice versa.
+/// After this, the workspaces appear to have swapped positions
+/// because their contents are swapped. The caller is responsible for
+/// swapping ephemeral state (labels, icons, CSS classes) separately
+/// via `State::swap_ephemeral`.
+///
+/// Skips sticky, pinned, and skip-tasklist windows since those
+/// are not bound to a specific workspace.
+pub fn swap_workspace_contents(ws_a: i32, ws_b: i32) {
+    if ws_a == ws_b {
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    tracing::info!(ws_a, ws_b, "swap_workspace_contents BEGIN");
+
+    let Some(screen) = Screen::get_default() else {
+        tracing::error!("no default screen for workspace swap");
+        return;
+    };
+
+    let Some(workspace_a) = screen.get_workspace(ws_a) else {
+        tracing::error!(ws_a, "workspace A not found");
+        return;
+    };
+    let Some(workspace_b) = screen.get_workspace(ws_b) else {
+        tracing::error!(ws_b, "workspace B not found");
+        return;
+    };
+
+    let windows = screen.get_windows();
+
+    // Collect windows on each workspace (skip sticky/pinned/skip-tasklist)
+    let mut on_a = Vec::new();
+    let mut on_b = Vec::new();
+
+    for w in &windows {
+        if w.is_sticky() || w.is_pinned() || w.is_skip_tasklist() {
+            continue;
+        }
+        match w.get_workspace() {
+            Some(ws) if ws.get_number() == ws_a => on_a.push(w),
+            Some(ws) if ws.get_number() == ws_b => on_b.push(w),
+            _ => {}
+        }
+    }
+
+    tracing::debug!(
+        windows_on_a = on_a.len(),
+        windows_on_b = on_b.len(),
+        "swapping window contents"
+    );
+
+    // Move A's windows to B
+    for w in &on_a {
+        w.move_to_workspace(&workspace_b);
+    }
+
+    // Move B's windows to A
+    for w in &on_b {
+        w.move_to_workspace(&workspace_a);
+    }
+
+    tracing::info!(
+        ws_a, ws_b,
+        windows_moved = on_a.len() + on_b.len(),
+        elapsed_us = start.elapsed().as_micros(),
+        "swap_workspace_contents END"
+    );
+}

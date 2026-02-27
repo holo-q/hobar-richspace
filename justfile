@@ -17,11 +17,11 @@ default:
 
 # Build debug (Rust staticlib only - use link-debug for full plugin)
 build:
-    cargo build
+    /usr/bin/cargo build
 
 # Build release (Rust staticlib only - use link-release for full plugin)
 release:
-    cargo build --release
+    /usr/bin/cargo build --release
 
 # Link final plugin .so (debug)
 link-debug: build
@@ -61,27 +61,27 @@ uninstall:
 
 # Watch and rebuild on changes
 watch:
-    cargo watch -x build
+    /usr/bin/cargo watch -x build
 
 # Run tests
 test:
-    cargo test
+    /usr/bin/cargo test
 
 # Check types
 check:
-    cargo check
+    /usr/bin/cargo check
 
 # Format code
 fmt:
-    cargo fmt
+    /usr/bin/cargo fmt
 
 # Lint
 lint:
-    cargo clippy
+    /usr/bin/cargo clippy
 
 # Clean build artifacts
 clean:
-    cargo clean
+    /usr/bin/cargo clean
 
 # View plugin logs
 logs:

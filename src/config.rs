@@ -811,6 +811,7 @@ mod tests {
             icon: "󰖟".to_string(),
             match_mode: IconMatchMode::All,
             name: None,
+            cached_regex: OnceCell::new(),
         };
 
         // Should match when all windows are browsers
@@ -833,6 +834,7 @@ mod tests {
             icon: "󰖟".to_string(),
             match_mode: IconMatchMode::Any,
             name: None,
+            cached_regex: OnceCell::new(),
         };
 
         // Should match when ANY window is a browser

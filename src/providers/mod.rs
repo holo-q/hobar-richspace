@@ -30,7 +30,13 @@
 //! {"type": "register", "provider_id": "babel", "signals": {"has_claude": true}}
 //! {"type": "render", "workspace": 1, "dots": [...], "urgent": false}
 //! {"type": "signals", "workspace": 1, "has_claude": true, "claude_count": 2}
+//! {"type": "reorder", "workspace": 2, "direction": -1}
 //! ```
+//!
+//! The `reorder` message is a fire-and-forget command from external scripts
+//! (e.g. `richspace-reorder left`). It does NOT require prior registration --
+//! any socket client can send it. The `workspace` field is informational
+//! (for logging); the active workspace is what gets reordered.
 
 mod render;
 
@@ -71,6 +77,15 @@ pub enum ProviderMessage {
         signals: HashMap<String, serde_json::Value>,
     },
 
+    /// Reorder active workspace in display order
+    /// Fire-and-forget from external scripts; no registration needed.
+    /// direction: -1 = move left, +1 = move right
+    /// workspace: informational (for logging), active workspace is reordered
+    Reorder {
+        workspace: i32,
+        direction: i32,
+    },
+
     /// Provider disconnecting cleanly
     Disconnect,
 }
@@ -97,6 +112,10 @@ pub enum ProviderEvent {
     /// Provider disconnected
     Disconnected {
         provider_id: String,
+    },
+    /// Reorder active workspace (from external IPC, no provider needed)
+    Reorder {
+        direction: i32,
     },
 }
 
@@ -299,6 +318,10 @@ impl ProviderRegistry {
                     "Provider cleanup complete"
                 );
             }
+
+            // Reorder events are intercepted by the app.rs bridge before reaching
+            // the registry. If one slips through, it's a no-op here.
+            ProviderEvent::Reorder { .. } => {}
         }
     }
 }
@@ -577,6 +600,25 @@ async fn handle_connection(
                         workspace,
                         "Received Signals message before Register - ignoring"
                     );
+                }
+            }
+
+            ProviderMessage::Reorder { workspace, direction } => {
+                // Fire-and-forget reorder command from external scripts.
+                // No registration required -- any socket client can send this.
+                tracing::info!(
+                    connection_id,
+                    workspace,
+                    direction,
+                    "Reorder command received via IPC"
+                );
+
+                if event_tx.send(ProviderEvent::Reorder { direction }).is_err() {
+                    tracing::error!(
+                        connection_id,
+                        "Failed to send Reorder event - main loop may have exited"
+                    );
+                    break;
                 }
             }
 

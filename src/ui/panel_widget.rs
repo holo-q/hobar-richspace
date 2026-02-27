@@ -242,8 +242,7 @@ impl WorkspaceWidget {
         for (display_pos, &ws_num) in display_order.iter().enumerate() {
             if let Some(ws) = ws_map.get(&ws_num) {
                 let render_state = state.providers.get_render_state(ws.number).cloned();
-                let mut button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone());
-                button_state.display_position = display_pos;
+                let button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone(), display_pos);
 
                 // Measure preferred size before adding to container
                 // GTK computes natural size from widget content (labels, padding, CSS)
@@ -636,12 +635,17 @@ impl WorkspaceWidget {
     // =========================================================================
 
     /// Create persistent button state for a workspace
+    ///
+    /// `display_pos` is the visual index in the button row (0-based), used for
+    /// drag-and-drop reorder — each button knows its position so DnD can fire
+    /// `AppEvent::ReorderWorkspace { from_pos, to_pos }` with concrete indices.
     fn create_button_state(
         &self,
         ws: &crate::wnck::WorkspaceInfo,
         state: &AppState,
         render_state: Option<RenderState>,
         last_frame: Rc<RefCell<Instant>>,
+        display_pos: usize,
     ) -> ButtonState {
         let button = gtk::Button::new();
         self.add_css_to_widget(&button);
@@ -870,6 +874,71 @@ impl WorkspaceWidget {
             Propagation::Proceed
         });
 
+        // ─── Drag-and-Drop for workspace reordering ────────────────────────
+        // Each button is both a drag source and destination. Dragging a button
+        // onto another fires ReorderWorkspace with the display positions, which
+        // the app event loop translates into a display_order permutation +
+        // smooth animation via reorder_animate().
+        let target_entries = &[gtk::TargetEntry::new(
+            "application/x-richspace-workspace",
+            gtk::TargetFlags::SAME_APP,
+            0,
+        )];
+
+        button.drag_source_set(
+            gdk::ModifierType::BUTTON1_MASK,
+            target_entries,
+            gdk::DragAction::MOVE,
+        );
+
+        button.drag_dest_set(
+            gtk::DestDefaults::all(),
+            target_entries,
+            gdk::DragAction::MOVE,
+        );
+
+        // Drag begin: visual feedback — dim the source button
+        {
+            let button_clone = button.clone();
+            button.connect_drag_begin(move |_, _context| {
+                button_clone.style_context().add_class("dragging");
+                tracing::debug!(display_pos, "DnD drag-begin");
+            });
+        }
+
+        // Provide data: serialize our display position as text
+        button.connect_drag_data_get(move |_, _, selection_data, _, _| {
+            let pos_str = display_pos.to_string();
+            let _ = selection_data.set_text(&pos_str);
+        });
+
+        // Receive drop: fire reorder event when a different button lands here
+        {
+            let tx_dnd = self.tx.clone();
+            button.connect_drag_data_received(move |_, _, _, _, selection_data, _, _| {
+                if let Some(text) = selection_data.text() {
+                    if let Ok(from_pos) = text.parse::<usize>() {
+                        if from_pos != display_pos {
+                            tracing::debug!(from_pos, to_pos = display_pos, "DnD reorder event");
+                            tx_dnd.send(AppEvent::ReorderWorkspace {
+                                from_pos,
+                                to_pos: display_pos,
+                            }).ok();
+                        }
+                    }
+                }
+            });
+        }
+
+        // Drag end: cleanup — remove visual feedback regardless of outcome
+        {
+            let button_clone2 = button.clone();
+            button.connect_drag_end(move |_, _| {
+                button_clone2.style_context().remove_class("dragging");
+                tracing::debug!("DnD drag-end cleanup");
+            });
+        }
+
         ButtonState {
             button,
             icon,
@@ -878,7 +947,7 @@ impl WorkspaceWidget {
             drawing_area,
             render_state: shared_render_state,
             workspace_number: ws.number,
-            display_position: 0, // Set by caller
+            display_position: display_pos,
         }
     }
 
@@ -1010,6 +1079,15 @@ impl WorkspaceWidget {
             padding: 1px 4px;
             border-radius: 8px;
             margin-left: 4px;
+        }
+
+        .richspace-button.dragging {
+            opacity: 0.4;
+            transition: opacity 100ms ease;
+        }
+
+        .richspace-button.drag-over {
+            border-left: 2px solid @theme_selected_bg_color;
         }
 "#);
 

@@ -185,10 +185,21 @@ impl App {
             let tx = tx.clone();
             let (provider_tx, provider_rx) = glib::MainContext::channel::<ProviderEvent>(glib::Priority::DEFAULT);
 
-            // Bridge provider events to main event loop
+            // Bridge provider events to main event loop.
+            // Reorder events short-circuit to AppEvent::ReorderActiveWorkspace
+            // instead of going through the provider registry -- they're fire-and-forget
+            // IPC commands from external scripts, not provider state updates.
             provider_rx.attach(None, move |event| {
-                tracing::trace!(event = ?event, "provider event bridged to main loop");
-                tx.send(AppEvent::ProviderUpdate(event)).ok();
+                match event {
+                    ProviderEvent::Reorder { direction } => {
+                        tracing::debug!(direction, "provider IPC reorder -> AppEvent::ReorderActiveWorkspace");
+                        tx.send(AppEvent::ReorderActiveWorkspace { direction }).ok();
+                    }
+                    other => {
+                        tracing::trace!(event = ?other, "provider event bridged to main loop");
+                        tx.send(AppEvent::ProviderUpdate(other)).ok();
+                    }
+                }
                 glib::ControlFlow::Continue
             });
 
@@ -762,6 +773,7 @@ impl App {
                 let active = wnck::active_workspace_number().unwrap_or(0);
                 let mut state = self.app_state.borrow_mut();
                 let ws_count = state.workspaces.len();
+                let true_reorder = state.config.true_reorder;
 
                 // Ensure display order is initialized
                 if state.state.display_order.len() != ws_count {
@@ -771,18 +783,46 @@ impl App {
 
                 // Find active workspace's display position
                 if let Some(pos) = state.state.display_position_of(active) {
-                    if let Some(_new_pos) = state.state.swap_adjacent(pos, direction) {
-                        // Save state
+                    let new_pos_val = (pos as i32 + direction) as usize;
+                    if new_pos_val >= ws_count {
+                        tracing::debug!(direction, pos, "reorder clamped at boundary");
+                    } else if true_reorder {
+                        // True reorder: swap actual window contents between workspaces.
+                        // Display order stays the same -- the windows themselves move,
+                        // making the reorder visible to all apps, pagers, and m-N shortcuts.
+                        let other_ws = state.state.display_order[new_pos_val];
+                        // Swap ephemeral state (labels, icons, CSS, urgent) so customizations
+                        // follow the window contents to their new workspace number
+                        state.state.swap_ephemeral(active, other_ws);
                         if let Err(e) = state.state.save() {
-                            tracing::error!(error = %e, "failed to save reordered state");
+                            tracing::error!(error = %e, "failed to save swapped ephemeral state");
                         }
                         drop(state);
-                        // TODO Phase 7: if config.true_reorder, swap window contents here
-                        // Animate buttons to new positions
-                        self.widget.reorder_animate(&self.app_state.borrow());
-                        tracing::info!(direction, active_ws = active, "RENDER OUT - workspace reordered");
+                        // Swap the actual X11 windows between workspaces
+                        wnck::swap_workspace_contents(active, other_ws);
+                        // Switch to the target workspace so the user follows their windows
+                        wnck::switch_to_workspace(other_ws);
+                        tracing::info!(
+                            direction, active_ws = active, target_ws = other_ws,
+                            "RENDER OUT - true reorder (windows swapped)"
+                        );
+                        // Render will happen via ActiveWorkspaceChanged signal from the switch
                     } else {
-                        tracing::debug!(direction, pos, "reorder clamped at boundary");
+                        // Virtual reorder: only change display order in richspace.
+                        // Buttons rearrange visually but actual workspace numbers stay put.
+                        if let Some(_new_pos) = state.state.swap_adjacent(pos, direction) {
+                            if let Err(e) = state.state.save() {
+                                tracing::error!(error = %e, "failed to save reordered state");
+                            }
+                            drop(state);
+                            self.widget.reorder_animate(&self.app_state.borrow());
+                            tracing::info!(
+                                direction, active_ws = active,
+                                "RENDER OUT - virtual reorder (display order swapped)"
+                            );
+                        } else {
+                            tracing::debug!(direction, pos, "virtual reorder clamped at boundary");
+                        }
                     }
                 } else {
                     tracing::warn!(active, "active workspace not found in display order");
@@ -792,6 +832,7 @@ impl App {
                 tracing::info!(from_pos, to_pos, "SIGNAL IN - reorder workspace (drag)");
                 let mut state = self.app_state.borrow_mut();
                 let ws_count = state.workspaces.len();
+                let true_reorder = state.config.true_reorder;
 
                 // Ensure display order is initialized
                 if state.state.display_order.len() != ws_count {
@@ -799,14 +840,37 @@ impl App {
                     state.state.reconcile_display_order(&ws_nums);
                 }
 
-                state.state.reorder(from_pos, to_pos);
-                if let Err(e) = state.state.save() {
-                    tracing::error!(error = %e, "failed to save reordered state");
+                if true_reorder {
+                    // True reorder: swap window contents between the two workspaces.
+                    // Display order stays identity -- the actual windows move.
+                    // For drag, from_pos and to_pos are display positions.
+                    let ws_from = state.state.display_order[from_pos];
+                    let ws_to = state.state.display_order[to_pos];
+                    state.state.swap_ephemeral(ws_from, ws_to);
+                    if let Err(e) = state.state.save() {
+                        tracing::error!(error = %e, "failed to save swapped ephemeral state");
+                    }
+                    drop(state);
+                    wnck::swap_workspace_contents(ws_from, ws_to);
+                    // Full render to reflect the swapped window contents
+                    self.widget.render(&self.app_state.borrow());
+                    tracing::info!(
+                        from_pos, to_pos, ws_from, ws_to,
+                        "RENDER OUT - true reorder drag (windows swapped)"
+                    );
+                } else {
+                    // Virtual reorder: only change display order
+                    state.state.reorder(from_pos, to_pos);
+                    if let Err(e) = state.state.save() {
+                        tracing::error!(error = %e, "failed to save reordered state");
+                    }
+                    drop(state);
+                    self.widget.reorder_animate(&self.app_state.borrow());
+                    tracing::info!(
+                        from_pos, to_pos,
+                        "RENDER OUT - virtual reorder drag (display order changed)"
+                    );
                 }
-                drop(state);
-                // TODO Phase 7: if config.true_reorder, swap window contents
-                self.widget.reorder_animate(&self.app_state.borrow());
-                tracing::info!(from_pos, to_pos, "RENDER OUT - workspace reordered (drag)");
             }
             AppEvent::Configure => {
                 tracing::info!("configure requested");
