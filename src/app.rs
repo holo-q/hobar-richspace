@@ -50,6 +50,11 @@ pub enum AppEvent {
     SetWorkspaceIcon { workspace: i32, icon: Option<String> },
     /// Clear all customizations for a workspace
     ClearWorkspaceCustomizations { workspace: i32 },
+    /// Reorder: move active workspace left/right in display order
+    /// direction: -1 = move left, +1 = move right
+    ReorderActiveWorkspace { direction: i32 },
+    /// Reorder: move workspace from one display position to another (drag-and-drop)
+    ReorderWorkspace { from_pos: usize, to_pos: usize },
     /// Open configuration dialog
     Configure,
     /// Save configuration
@@ -277,11 +282,18 @@ impl App {
         tracing::debug!("panel signals connected");
 
         // Set up event handler
+        // Guard against reentrant calls - GTK draw callbacks can fire synchronously
+        // within handle_event, causing RefCell panic if we're already borrowed
         tracing::debug!("attaching event handler to main context");
         {
             let app_ref = app.clone();
             rx.attach(None, move |event| {
-                app_ref.borrow_mut().handle_event(event);
+                match app_ref.try_borrow_mut() {
+                    Ok(mut app) => app.handle_event(event),
+                    Err(_) => {
+                        tracing::warn!("Skipped event {:?} - reentrant call detected", event);
+                    }
+                }
                 glib::ControlFlow::Continue
             });
         }
@@ -519,7 +531,13 @@ impl App {
                 // Refresh workspace info - full rebuild needed (workspace added/removed)
                 tracing::info!(trigger = "workspaces_changed", "SIGNAL IN - workspace count changed");
                 let t0 = Instant::now();
-                self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
+                {
+                    let mut state_borrow = self.app_state.borrow_mut();
+                    state_borrow.workspaces = wnck::get_workspaces();
+                    // Reconcile display order with new workspace set
+                    let ws_numbers: Vec<i32> = state_borrow.workspaces.iter().map(|w| w.number).collect();
+                    state_borrow.state.reconcile_display_order(&ws_numbers);
+                }
                 let t1 = Instant::now();
                 let ws_count = self.app_state.borrow().workspaces.len();
                 self.widget.render(&self.app_state.borrow());
@@ -536,11 +554,19 @@ impl App {
                 // This is the fast path for workspace switching
                 tracing::info!(trigger = "active_workspace_changed", "SIGNAL IN - workspace switch");
                 let t0 = Instant::now();
-                self.app_state.borrow_mut().workspaces = wnck::get_workspaces();
-                let t1 = Instant::now();
-                let active = self.app_state.borrow().workspaces.iter()
-                    .find(|ws| ws.is_active)
-                    .map(|ws| ws.number);
+
+                // Scope borrows carefully - GTK callbacks during update_active can trigger
+                // nested events, causing RefCell panic if app_state is still borrowed
+                let (active, t1) = {
+                    let mut state = self.app_state.borrow_mut();
+                    state.workspaces = wnck::get_workspaces();
+                    let t1 = Instant::now();
+                    let active = state.workspaces.iter()
+                        .find(|ws| ws.is_active)
+                        .map(|ws| ws.number);
+                    (active, t1)
+                }; // borrow_mut dropped here before update_active
+
                 self.widget.update_active(&self.app_state.borrow());
                 let t2 = Instant::now();
                 tracing::info!(
@@ -657,34 +683,44 @@ impl App {
                 wnck::switch_to_workspace(num);
             }
             AppEvent::ScrollWorkspace { delta, wrap } => {
-                // Get current workspace and total count
+                let state = self.app_state.borrow();
                 let current = wnck::active_workspace_number().unwrap_or(0);
-                let count = self.app_state.borrow().workspaces.len() as i32;
+                let count = state.workspaces.len();
 
                 if count == 0 {
                     tracing::warn!("scroll ignored - no workspaces");
                     return;
                 }
 
-                // Calculate next workspace
-                let mut next = current + delta;
+                let display_order = state.state.effective_display_order(count);
 
+                // Find current workspace's display position
+                let current_pos = display_order.iter()
+                    .position(|&n| n == current)
+                    .unwrap_or(0) as i32;
+                let count_i32 = count as i32;
+
+                let mut next_pos = current_pos + delta;
                 if wrap {
-                    // Wrap around using proper modulo for negative numbers
-                    next = next.rem_euclid(count);
+                    next_pos = next_pos.rem_euclid(count_i32);
                 } else {
-                    // Clamp to valid range
-                    next = next.clamp(0, count - 1);
+                    next_pos = next_pos.clamp(0, count_i32 - 1);
                 }
 
+                // Map display position back to workspace number
+                let next_ws = display_order[next_pos as usize];
+
                 tracing::debug!(
-                    current = current,
-                    delta = delta,
-                    next = next,
-                    wrap = wrap,
-                    "scroll workspace"
+                    current_ws = current,
+                    current_pos = current_pos,
+                    delta,
+                    next_pos = next_pos,
+                    next_ws,
+                    wrap,
+                    "scroll workspace (display-order-aware)"
                 );
-                wnck::switch_to_workspace(next);
+                drop(state);
+                wnck::switch_to_workspace(next_ws);
             }
             AppEvent::SetWorkspaceLabel { workspace, ref label } => {
                 tracing::debug!(workspace, label = ?label, "set workspace label");
@@ -718,6 +754,57 @@ impl App {
                 }
                 // Render immediately
                 self.widget.render(&self.app_state.borrow());
+            }
+            AppEvent::ReorderActiveWorkspace { direction } => {
+                tracing::info!(direction, "SIGNAL IN - reorder active workspace");
+                let active = wnck::active_workspace_number().unwrap_or(0);
+                let mut state = self.app_state.borrow_mut();
+                let ws_count = state.workspaces.len();
+
+                // Ensure display order is initialized
+                if state.state.display_order.len() != ws_count {
+                    let ws_nums: Vec<i32> = state.workspaces.iter().map(|w| w.number).collect();
+                    state.state.reconcile_display_order(&ws_nums);
+                }
+
+                // Find active workspace's display position
+                if let Some(pos) = state.state.display_position_of(active) {
+                    if let Some(_new_pos) = state.state.swap_adjacent(pos, direction) {
+                        // Save state
+                        if let Err(e) = state.state.save() {
+                            tracing::error!(error = %e, "failed to save reordered state");
+                        }
+                        drop(state);
+                        // TODO Phase 7: if config.true_reorder, swap window contents here
+                        // Re-render with animation
+                        self.widget.render(&self.app_state.borrow());
+                        tracing::info!(direction, active_ws = active, "RENDER OUT - workspace reordered");
+                    } else {
+                        tracing::debug!(direction, pos, "reorder clamped at boundary");
+                    }
+                } else {
+                    tracing::warn!(active, "active workspace not found in display order");
+                }
+            }
+            AppEvent::ReorderWorkspace { from_pos, to_pos } => {
+                tracing::info!(from_pos, to_pos, "SIGNAL IN - reorder workspace (drag)");
+                let mut state = self.app_state.borrow_mut();
+                let ws_count = state.workspaces.len();
+
+                // Ensure display order is initialized
+                if state.state.display_order.len() != ws_count {
+                    let ws_nums: Vec<i32> = state.workspaces.iter().map(|w| w.number).collect();
+                    state.state.reconcile_display_order(&ws_nums);
+                }
+
+                state.state.reorder(from_pos, to_pos);
+                if let Err(e) = state.state.save() {
+                    tracing::error!(error = %e, "failed to save reordered state");
+                }
+                drop(state);
+                // TODO Phase 7: if config.true_reorder, swap window contents
+                self.widget.render(&self.app_state.borrow());
+                tracing::info!(from_pos, to_pos, "RENDER OUT - workspace reordered (drag)");
             }
             AppEvent::Configure => {
                 tracing::info!("configure requested");

@@ -309,6 +309,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub scroll_wrap: bool,
 
+    // ─── Reordering ─────────────────────────────────────────────────────────
+    /// Enable true workspace reorder (swap windows between workspaces).
+    /// When false, only changes visual display order in richspace.
+    /// Default: true — makes reorder visible to all apps and pagers.
+    #[serde(default = "default_true")]
+    pub true_reorder: bool,
+
     // ─── Typography ─────────────────────────────────────────────────────────
     /// Custom font family (None = use system default)
     #[serde(default)]
@@ -464,6 +471,9 @@ impl Default for Config {
             // Scrolling
             scroll_enabled: true,
             scroll_wrap: true,
+
+            // Reordering
+            true_reorder: true,
 
             // Typography - use system defaults
             font_family: None,
