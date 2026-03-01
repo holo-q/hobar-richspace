@@ -26,7 +26,7 @@ use gdk;
 use glib::prelude::IsA;
 use glib::Propagation;
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,8 @@ struct ButtonState {
     /// X11 workspace number this button represents
     workspace_number: i32,
     /// Display position (index in visual order, not workspace number)
-    display_position: usize,
+    /// Rc<Cell> so DnD closures always read the current position after reorder_animate()
+    display_position: Rc<Cell<usize>>,
 }
 
 /// Main workspace widget
@@ -348,7 +349,7 @@ impl WorkspaceWidget {
         let mut old_options: Vec<Option<ButtonState>> = old_buttons.into_iter().map(Some).collect();
         for (new_pos, &old_idx) in new_indices.iter().enumerate() {
             if let Some(mut bs) = old_options[old_idx].take() {
-                bs.display_position = new_pos;
+                bs.display_position.set(new_pos);
                 buttons.push(bs);
             }
         }
@@ -443,6 +444,10 @@ impl WorkspaceWidget {
                 if let Some(ref css_class) = ws_state.css_class {
                     ctx.add_class(css_class);
                 }
+            } else {
+                // No state entry — clean up any previously applied classes
+                // (e.g., workspace was cleared via ClearWorkspaceCustomizations)
+                ctx.remove_class("urgent");
             }
 
             // Update icon and label text (for rule changes, custom labels, etc.)
@@ -879,6 +884,11 @@ impl WorkspaceWidget {
         // onto another fires ReorderWorkspace with the display positions, which
         // the app event loop translates into a display_order permutation +
         // smooth animation via reorder_animate().
+        //
+        // display_pos_cell is Rc<Cell> so closures always read the CURRENT position
+        // after reorder_animate() updates it, avoiding stale DnD indices.
+        let display_pos_cell = Rc::new(Cell::new(display_pos));
+
         let target_entries = &[gtk::TargetEntry::new(
             "application/x-richspace-workspace",
             gtk::TargetFlags::SAME_APP,
@@ -900,29 +910,35 @@ impl WorkspaceWidget {
         // Drag begin: visual feedback — dim the source button
         {
             let button_clone = button.clone();
+            let pos = display_pos_cell.clone();
             button.connect_drag_begin(move |_, _context| {
                 button_clone.style_context().add_class("dragging");
-                tracing::debug!(display_pos, "DnD drag-begin");
+                tracing::debug!(display_pos = pos.get(), "DnD drag-begin");
             });
         }
 
         // Provide data: serialize our display position as text
-        button.connect_drag_data_get(move |_, _, selection_data, _, _| {
-            let pos_str = display_pos.to_string();
-            let _ = selection_data.set_text(&pos_str);
-        });
+        {
+            let pos = display_pos_cell.clone();
+            button.connect_drag_data_get(move |_, _, selection_data, _, _| {
+                let pos_str = pos.get().to_string();
+                let _ = selection_data.set_text(&pos_str);
+            });
+        }
 
         // Receive drop: fire reorder event when a different button lands here
         {
             let tx_dnd = self.tx.clone();
+            let pos = display_pos_cell.clone();
             button.connect_drag_data_received(move |_, _, _, _, selection_data, _, _| {
                 if let Some(text) = selection_data.text() {
                     if let Ok(from_pos) = text.parse::<usize>() {
-                        if from_pos != display_pos {
-                            tracing::debug!(from_pos, to_pos = display_pos, "DnD reorder event");
+                        let to_pos = pos.get();
+                        if from_pos != to_pos {
+                            tracing::debug!(from_pos, to_pos, "DnD reorder event");
                             tx_dnd.send(AppEvent::ReorderWorkspace {
                                 from_pos,
-                                to_pos: display_pos,
+                                to_pos,
                             }).ok();
                         }
                     }
@@ -947,7 +963,7 @@ impl WorkspaceWidget {
             drawing_area,
             render_state: shared_render_state,
             workspace_number: ws.number,
-            display_position: display_pos,
+            display_position: display_pos_cell,
         }
     }
 

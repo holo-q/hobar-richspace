@@ -770,6 +770,9 @@ impl App {
             }
             AppEvent::ReorderActiveWorkspace { direction } => {
                 tracing::info!(direction, "SIGNAL IN - reorder active workspace");
+                // Clamp IPC direction to valid range — external callers could send any i32
+                let direction = direction.clamp(-1, 1);
+                if direction == 0 { return; }
                 let active = wnck::active_workspace_number().unwrap_or(0);
                 let mut state = self.app_state.borrow_mut();
                 let ws_count = state.workspaces.len();
@@ -791,21 +794,30 @@ impl App {
                         // Display order stays the same -- the windows themselves move,
                         // making the reorder visible to all apps, pagers, and m-N shortcuts.
                         let other_ws = state.state.display_order[new_pos_val];
-                        // Swap ephemeral state (labels, icons, CSS, urgent) so customizations
-                        // follow the window contents to their new workspace number
-                        state.state.swap_ephemeral(active, other_ws);
-                        if let Err(e) = state.state.save() {
-                            tracing::error!(error = %e, "failed to save swapped ephemeral state");
-                        }
+                        // CRITICAL: Drop state borrow BEFORE window swap to avoid
+                        // state/window divergence if the swap fails.
                         drop(state);
-                        // Swap the actual X11 windows between workspaces
-                        wnck::swap_workspace_contents(active, other_ws);
-                        // Switch to the target workspace so the user follows their windows
-                        wnck::switch_to_workspace(other_ws);
-                        tracing::info!(
-                            direction, active_ws = active, target_ws = other_ws,
-                            "RENDER OUT - true reorder (windows swapped)"
-                        );
+                        // Swap the actual X11 windows between workspaces FIRST
+                        if wnck::swap_workspace_contents(active, other_ws) {
+                            // Window swap succeeded — now safe to swap ephemeral state
+                            let mut state = self.app_state.borrow_mut();
+                            state.state.swap_ephemeral(active, other_ws);
+                            if let Err(e) = state.state.save() {
+                                tracing::error!(error = %e, "failed to save swapped ephemeral state");
+                            }
+                            drop(state);
+                            // Switch to the target workspace so the user follows their windows
+                            wnck::switch_to_workspace(other_ws);
+                            tracing::info!(
+                                direction, active_ws = active, target_ws = other_ws,
+                                "RENDER OUT - true reorder (windows swapped)"
+                            );
+                        } else {
+                            tracing::warn!(
+                                active_ws = active, target_ws = other_ws,
+                                "true reorder aborted — window swap failed"
+                            );
+                        }
                         // Render will happen via ActiveWorkspaceChanged signal from the switch
                     } else {
                         // Virtual reorder: only change display order in richspace.
@@ -844,20 +856,37 @@ impl App {
                     // True reorder: swap window contents between the two workspaces.
                     // Display order stays identity -- the actual windows move.
                     // For drag, from_pos and to_pos are display positions.
+                    // Bounds check: DnD positions can be stale after workspace add/remove
+                    if from_pos >= state.state.display_order.len() || to_pos >= state.state.display_order.len() {
+                        tracing::warn!(from_pos, to_pos, len = state.state.display_order.len(), "DnD reorder out of bounds");
+                        return;
+                    }
                     let ws_from = state.state.display_order[from_pos];
                     let ws_to = state.state.display_order[to_pos];
-                    state.state.swap_ephemeral(ws_from, ws_to);
-                    if let Err(e) = state.state.save() {
-                        tracing::error!(error = %e, "failed to save swapped ephemeral state");
-                    }
+                    // CRITICAL: Drop state borrow BEFORE window swap to avoid
+                    // state/window divergence if the swap fails.
                     drop(state);
-                    wnck::swap_workspace_contents(ws_from, ws_to);
-                    // Full render to reflect the swapped window contents
-                    self.widget.render(&self.app_state.borrow());
-                    tracing::info!(
-                        from_pos, to_pos, ws_from, ws_to,
-                        "RENDER OUT - true reorder drag (windows swapped)"
-                    );
+                    // Swap the actual X11 windows FIRST
+                    if wnck::swap_workspace_contents(ws_from, ws_to) {
+                        // Window swap succeeded — now safe to swap ephemeral state
+                        let mut state = self.app_state.borrow_mut();
+                        state.state.swap_ephemeral(ws_from, ws_to);
+                        if let Err(e) = state.state.save() {
+                            tracing::error!(error = %e, "failed to save swapped ephemeral state");
+                        }
+                        drop(state);
+                        // Full render to reflect the swapped window contents
+                        self.widget.render(&self.app_state.borrow());
+                        tracing::info!(
+                            from_pos, to_pos, ws_from, ws_to,
+                            "RENDER OUT - true reorder drag (windows swapped)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            ws_from, ws_to,
+                            "true reorder drag aborted — window swap failed"
+                        );
+                    }
                 } else {
                     // Virtual reorder: only change display order
                     state.state.reorder(from_pos, to_pos);

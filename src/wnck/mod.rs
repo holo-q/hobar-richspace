@@ -212,13 +212,17 @@ pub fn connect_window_closed<F: Fn() + 'static>(f: F) {
 /// After this, the workspaces appear to have swapped positions
 /// because their contents are swapped. The caller is responsible for
 /// swapping ephemeral state (labels, icons, CSS classes) separately
-/// via `State::swap_ephemeral`.
+/// via `State::swap_ephemeral` -- but ONLY after this function returns `true`.
+///
+/// Returns `true` if the swap succeeded, `false` if ws_a == ws_b, no screen,
+/// or a workspace was not found. Callers must check the return value before
+/// mutating ephemeral state to avoid state/window divergence.
 ///
 /// Skips sticky, pinned, and skip-tasklist windows since those
 /// are not bound to a specific workspace.
-pub fn swap_workspace_contents(ws_a: i32, ws_b: i32) {
+pub fn swap_workspace_contents(ws_a: i32, ws_b: i32) -> bool {
     if ws_a == ws_b {
-        return;
+        return false;
     }
 
     let start = std::time::Instant::now();
@@ -226,16 +230,16 @@ pub fn swap_workspace_contents(ws_a: i32, ws_b: i32) {
 
     let Some(screen) = Screen::get_default() else {
         tracing::error!("no default screen for workspace swap");
-        return;
+        return false;
     };
 
     let Some(workspace_a) = screen.get_workspace(ws_a) else {
         tracing::error!(ws_a, "workspace A not found");
-        return;
+        return false;
     };
     let Some(workspace_b) = screen.get_workspace(ws_b) else {
         tracing::error!(ws_b, "workspace B not found");
-        return;
+        return false;
     };
 
     let windows = screen.get_windows();
@@ -277,4 +281,5 @@ pub fn swap_workspace_contents(ws_a: i32, ws_b: i32) {
         elapsed_us = start.elapsed().as_micros(),
         "swap_workspace_contents END"
     );
+    true
 }
