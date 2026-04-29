@@ -148,19 +148,6 @@ impl RenderState {
             ctx.set_source_rgb(dot.r, dot.g, dot.b);
             ctx.arc(x, y, radius, 0.0, TAU);
             ctx.fill().ok();
-
-            // Draw subtle highlight (top-left shine)
-            let highlight_offset = radius * 0.3;
-            let highlight_radius = radius * 0.2;
-            ctx.set_source_rgba(1.0, 1.0, 1.0, 0.3);
-            ctx.arc(
-                x - highlight_offset,
-                y - highlight_offset,
-                highlight_radius,
-                0.0,
-                TAU,
-            );
-            ctx.fill().ok();
         }
     }
 }

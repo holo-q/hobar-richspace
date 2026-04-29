@@ -29,13 +29,22 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
+use super::context_menu::build_workspace_menu;
 use crate::app::{AppEvent, AppState};
 use crate::config::WindowCountDisplay;
 use crate::providers::RenderState;
-use super::context_menu::build_workspace_menu;
 
 const WORKSPACE_DND_TARGET: &str = "application/x-richspace-workspace";
 const XFCE_WINDOW_DND_TARGET: &str = "application/x-wnck-window-id";
+const BABEL_WORKSPACE_CLASSES: &[&str] = &[
+    "claude-idle",
+    "claude-busy",
+    "claude-busy-all",
+    "claude-await",
+    "claude-await-low",
+    "claude-await-mid",
+    "claude-await-hot",
+];
 
 /// Persistent state for a single workspace button
 ///
@@ -126,7 +135,12 @@ impl WorkspaceWidget {
                 _ => return Propagation::Proceed,
             };
 
-            tx_scroll.send(AppEvent::ScrollWorkspace { delta, wrap: scroll_wrap }).ok();
+            tx_scroll
+                .send(AppEvent::ScrollWorkspace {
+                    delta,
+                    wrap: scroll_wrap,
+                })
+                .ok();
             Propagation::Stop
         });
 
@@ -190,11 +204,17 @@ impl WorkspaceWidget {
                 "Workspace count changed, rebuilding"
             );
             self.rebuild(state);
-            tracing::debug!(elapsed_us = start.elapsed().as_micros(), "render() via rebuild complete");
+            tracing::debug!(
+                elapsed_us = start.elapsed().as_micros(),
+                "render() via rebuild complete"
+            );
         } else {
             // Just update state (CSS classes, labels, dots)
             self.update_state(state);
-            tracing::debug!(elapsed_us = start.elapsed().as_micros(), "render() via update_state complete");
+            tracing::debug!(
+                elapsed_us = start.elapsed().as_micros(),
+                "render() via update_state complete"
+            );
         }
     }
 
@@ -232,7 +252,13 @@ impl WorkspaceWidget {
         for (display_pos, &ws_num) in display_order.iter().enumerate() {
             if let Some(ws) = ws_map.get(&ws_num) {
                 let render_state = state.providers.get_render_state(ws.number).cloned();
-                let button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone(), display_pos);
+                let button_state = self.create_button_state(
+                    ws,
+                    state,
+                    render_state,
+                    self.last_frame.clone(),
+                    display_pos,
+                );
 
                 self.container.pack_start(
                     &button_state.button,
@@ -281,7 +307,8 @@ impl WorkspaceWidget {
         }
 
         // Build new order (indices into current buttons vec)
-        let new_indices: Vec<usize> = display_order.iter()
+        let new_indices: Vec<usize> = display_order
+            .iter()
             .filter_map(|&ws_num| ws_to_idx.get(&ws_num).copied())
             .collect();
 
@@ -366,6 +393,9 @@ impl WorkspaceWidget {
 
             // Update CSS classes
             let ctx = bs.button.style_context();
+            for class_name in BABEL_WORKSPACE_CLASSES {
+                ctx.remove_class(class_name);
+            }
 
             // Active state
             if ws.is_active {
@@ -431,10 +461,18 @@ impl WorkspaceWidget {
             if let Some(render_state) = state.providers.get_render_state(ws.number) {
                 // Update size if dot count changed
                 let new_dot_count = render_state.dots.len();
-                let width = if new_dot_count > 0 { (new_dot_count as i32 * 10).max(12) } else { 0 };
+                let width = if new_dot_count > 0 {
+                    (new_dot_count as i32 * 10).max(12)
+                } else {
+                    0
+                };
                 bs.drawing_area.set_size_request(width, state.size.max(16));
 
                 *bs.render_state.borrow_mut() = Some(render_state.clone());
+                bs.drawing_area.queue_draw();
+            } else {
+                bs.drawing_area.set_size_request(0, state.size.max(16));
+                *bs.render_state.borrow_mut() = None;
                 bs.drawing_area.queue_draw();
             }
         }
@@ -483,10 +521,7 @@ impl WorkspaceWidget {
     pub fn refresh_css(&self, state: &AppState) {
         let start = Instant::now();
         self.apply_default_css(state);
-        tracing::debug!(
-            elapsed_us = start.elapsed().as_micros(),
-            "CSS refreshed"
-        );
+        tracing::debug!(elapsed_us = start.elapsed().as_micros(), "CSS refreshed");
     }
 
     // =========================================================================
@@ -605,8 +640,16 @@ impl WorkspaceWidget {
         let drawing_area = {
             let da = gtk::DrawingArea::new();
             // Start with minimum size, will expand when dots arrive
-            let dot_count = shared_render_state.borrow().as_ref().map(|r| r.dots.len()).unwrap_or(0);
-            let width = if dot_count > 0 { (dot_count as i32 * 10).max(12) } else { 0 };
+            let dot_count = shared_render_state
+                .borrow()
+                .as_ref()
+                .map(|r| r.dots.len())
+                .unwrap_or(0);
+            let width = if dot_count > 0 {
+                (dot_count as i32 * 10).max(12)
+            } else {
+                0
+            };
             let height = state.size.max(16);
             da.set_size_request(width, height);
 
@@ -704,8 +747,9 @@ impl WorkspaceWidget {
                         move |new_label| {
                             tx.send(AppEvent::SetWorkspaceLabel {
                                 workspace: ws_num,
-                                label: new_label
-                            }).ok();
+                                label: new_label,
+                            })
+                            .ok();
                         }
                     },
                     {
@@ -713,16 +757,16 @@ impl WorkspaceWidget {
                         move |new_icon| {
                             tx.send(AppEvent::SetWorkspaceIcon {
                                 workspace: ws_num,
-                                icon: new_icon
-                            }).ok();
+                                icon: new_icon,
+                            })
+                            .ok();
                         }
                     },
                     {
                         let tx = tx.clone();
                         move || {
-                            tx.send(AppEvent::ClearWorkspaceCustomizations {
-                                workspace: ws_num
-                            }).ok();
+                            tx.send(AppEvent::ClearWorkspaceCustomizations { workspace: ws_num })
+                                .ok();
                         }
                     },
                 );
@@ -961,11 +1005,7 @@ impl WorkspaceWidget {
             button.connect_drag_failed(move |_, _, result| {
                 button_clone.style_context().remove_class("dragging");
                 button_clone.style_context().remove_class("drag-over");
-                tracing::warn!(
-                    display_pos = pos.get(),
-                    ?result,
-                    "DnD drag-failed cleanup"
-                );
+                tracing::warn!(display_pos = pos.get(), ?result, "DnD drag-failed cleanup");
                 Propagation::Proceed
             });
         }
@@ -1022,20 +1062,25 @@ impl WorkspaceWidget {
     fn apply_default_css(&self, state: &AppState) {
         let start = Instant::now();
 
-        let mut css = String::from(r#"
+        let mut css = String::from(
+            r#"
         .richspace {
             padding: 0;
             margin: 0;
         }
 
         .richspace-button {
-"#);
+"#,
+        );
 
-        css.push_str(&format!("            padding: {}px {}px;\n",
+        css.push_str(&format!(
+            "            padding: {}px {}px;\n",
             state.config.button_padding,
-            state.config.button_padding + 4));
+            state.config.button_padding + 4
+        ));
 
-        css.push_str(r#"            margin: 0;
+        css.push_str(
+            r#"            margin: 0;
             border-radius: 4px;
             min-width: 0;
             min-height: 0;
@@ -1067,16 +1112,20 @@ impl WorkspaceWidget {
 
         .richspace-icon {
             color: alpha(@theme_fg_color, 0.65);
-"#);
+"#,
+        );
 
         Self::append_icon_typography_css(&mut css, state);
         css.push_str("        }\n\n");
 
-        css.push_str("        .richspace-label {\n            color: alpha(@theme_fg_color, 0.65);\n");
+        css.push_str(
+            "        .richspace-label {\n            color: alpha(@theme_fg_color, 0.65);\n",
+        );
         Self::append_typography_css(&mut css, state);
         css.push_str("        }\n\n");
 
-        css.push_str(r#"        .richspace-button.active .richspace-icon,
+        css.push_str(
+            r#"        .richspace-button.active .richspace-icon,
         .richspace-button.active .richspace-label {
             color: @theme_fg_color;
         }
@@ -1108,35 +1157,6 @@ impl WorkspaceWidget {
             opacity: 0.7;
         }
 
-        .richspace-button.claude-idle {
-            border-bottom: 2px solid alpha(@theme_fg_color, 0.2);
-        }
-
-        .richspace-button.claude-busy {
-            background: alpha(#cca133, 0.15);
-            border-bottom: 2px solid #cca133;
-        }
-
-        .richspace-button.claude-busy-all {
-            background: alpha(#cca133, 0.25);
-            border-bottom: 3px solid #cca133;
-        }
-
-        .richspace-button.claude-await-low {
-            background: alpha(#d27998, 0.15);
-            border-bottom: 2px solid #d27998;
-        }
-
-        .richspace-button.claude-await-mid {
-            background: alpha(#d27998, 0.25);
-            border-bottom: 3px solid #d27998;
-        }
-
-        .richspace-button.claude-await-hot {
-            background: alpha(#ad1f51, 0.3);
-            border-bottom: 3px solid #ad1f51;
-        }
-
         .richspace-badge.claude-count {
             background: alpha(@theme_fg_color, 0.3);
             font-size: 7pt;
@@ -1153,7 +1173,8 @@ impl WorkspaceWidget {
         .richspace-button.drag-over {
             border-left: 2px solid @theme_selected_bg_color;
         }
-"#);
+"#,
+        );
 
         if let Some(ref custom) = state.config.custom_css {
             css.push_str("\n        /* Custom CSS */\n");
@@ -1166,10 +1187,9 @@ impl WorkspaceWidget {
             return;
         }
 
-        self.container.style_context().add_provider(
-            &self.css_provider,
-            gtk::STYLE_PROVIDER_PRIORITY_USER,
-        );
+        self.container
+            .style_context()
+            .add_provider(&self.css_provider, gtk::STYLE_PROVIDER_PRIORITY_USER);
 
         if let Some(screen) = gdk::Screen::default() {
             gtk::StyleContext::add_provider_for_screen(
@@ -1186,10 +1206,9 @@ impl WorkspaceWidget {
     }
 
     fn add_css_to_widget(&self, widget: &impl IsA<gtk::Widget>) {
-        widget.style_context().add_provider(
-            &self.css_provider,
-            gtk::STYLE_PROVIDER_PRIORITY_USER,
-        );
+        widget
+            .style_context()
+            .add_provider(&self.css_provider, gtk::STYLE_PROVIDER_PRIORITY_USER);
     }
 
     fn append_typography_css(css: &mut String, state: &AppState) {
@@ -1221,7 +1240,11 @@ impl WorkspaceWidget {
     // DISPLAY HELPERS
     // =========================================================================
 
-    fn get_workspace_icon(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> Option<String> {
+    fn get_workspace_icon(
+        &self,
+        ws: &crate::wnck::WorkspaceInfo,
+        state: &AppState,
+    ) -> Option<String> {
         if let Some(ws_state) = state.state.get(ws.number) {
             if let Some(ref icon) = ws_state.icon {
                 return Some(icon.clone());
@@ -1246,7 +1269,11 @@ impl WorkspaceWidget {
         }
 
         let icon = if ws.is_active {
-            state.config.active_icon.clone().unwrap_or_else(|| state.config.default_icon.clone())
+            state
+                .config
+                .active_icon
+                .clone()
+                .unwrap_or_else(|| state.config.default_icon.clone())
         } else {
             state.config.default_icon.clone()
         };
@@ -1254,7 +1281,11 @@ impl WorkspaceWidget {
         Some(icon)
     }
 
-    fn get_workspace_display(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> (Option<String>, Option<String>) {
+    fn get_workspace_display(
+        &self,
+        ws: &crate::wnck::WorkspaceInfo,
+        state: &AppState,
+    ) -> (Option<String>, Option<String>) {
         use crate::config::{DisplayMode, LabelSource};
 
         let icon = self.get_workspace_icon(ws, state);
@@ -1291,7 +1322,9 @@ impl WorkspaceWidget {
     }
 
     fn get_workspace_tooltip(&self, ws: &crate::wnck::WorkspaceInfo, state: &AppState) -> String {
-        let urgent = state.state.get(ws.number)
+        let urgent = state
+            .state
+            .get(ws.number)
             .and_then(|s| s.urgent)
             .unwrap_or(false);
 

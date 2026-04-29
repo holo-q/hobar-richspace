@@ -1,10 +1,10 @@
 //! Safe wrapper around XfcePanelPlugin
 
-use std::ffi::CStr;
-use gtk::prelude::*;
 use glib::translate::*;
+use gtk::prelude::*;
+use std::ffi::CStr;
 
-use super::ffi::{self, XfcePanelPluginPointer, XfceScreenPosition, XfcePanelPluginMode};
+use super::ffi::{self, XfcePanelPluginMode, XfcePanelPluginPointer, XfceScreenPosition};
 
 /// Safe wrapper around XfcePanelPlugin
 pub struct XfcePanelPlugin {
@@ -16,9 +16,8 @@ pub struct XfcePanelPlugin {
 impl XfcePanelPlugin {
     /// Create from raw pointer (called from constructor)
     pub fn from_raw(pointer: XfcePanelPluginPointer) -> Self {
-        let container: gtk::Container = unsafe {
-            gtk::Widget::from_glib_none(pointer).downcast().unwrap()
-        };
+        let container: gtk::Container =
+            unsafe { gtk::Widget::from_glib_none(pointer).downcast().unwrap() };
 
         XfcePanelPlugin { pointer, container }
     }
@@ -108,19 +107,23 @@ impl XfcePanelPlugin {
 
     /// Connect to orientation-changed signal
     pub fn connect_orientation_changed<F: Fn(gtk::Orientation) + 'static>(&self, f: F) {
-        self.container.connect_local("orientation-changed", false, move |values| {
-            let orientation = values[1].get::<gtk::Orientation>().unwrap_or(gtk::Orientation::Horizontal);
-            f(orientation);
-            None
-        });
+        self.container
+            .connect_local("orientation-changed", false, move |values| {
+                let orientation = values[1]
+                    .get::<gtk::Orientation>()
+                    .unwrap_or(gtk::Orientation::Horizontal);
+                f(orientation);
+                None
+            });
     }
 
     /// Connect to size-changed signal
     pub fn connect_size_changed<F: Fn(i32) -> bool + 'static>(&self, f: F) {
-        self.container.connect_local("size-changed", false, move |values| {
-            let size = values[1].get::<i32>().unwrap_or(24);
-            Some(f(size).to_value())
-        });
+        self.container
+            .connect_local("size-changed", false, move |values| {
+                let size = values[1].get::<i32>().unwrap_or(24);
+                Some(f(size).to_value())
+            });
     }
 
     /// Connect to free-data signal (cleanup)
@@ -141,9 +144,10 @@ impl XfcePanelPlugin {
 
     /// Connect to configure-plugin signal
     pub fn connect_configure_plugin<F: Fn() + 'static>(&self, f: F) {
-        self.container.connect_local("configure-plugin", false, move |_| {
-            f();
-            None
-        });
+        self.container
+            .connect_local("configure-plugin", false, move |_| {
+                f();
+                None
+            });
     }
 }

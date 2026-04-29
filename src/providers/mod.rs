@@ -81,10 +81,7 @@ pub enum ProviderMessage {
     /// Fire-and-forget from external scripts; no registration needed.
     /// direction: -1 = move left, +1 = move right
     /// workspace: informational (for logging), active workspace is reordered
-    Reorder {
-        workspace: i32,
-        direction: i32,
-    },
+    Reorder { workspace: i32, direction: i32 },
 
     /// Provider disconnecting cleanly
     Disconnect,
@@ -94,9 +91,7 @@ pub enum ProviderMessage {
 #[derive(Debug, Clone)]
 pub enum ProviderEvent {
     /// Provider connected and registered
-    Connected {
-        provider_id: String,
-    },
+    Connected { provider_id: String },
     /// Provider sent render update
     RenderUpdate {
         provider_id: String,
@@ -110,13 +105,9 @@ pub enum ProviderEvent {
         signals: HashMap<String, serde_json::Value>,
     },
     /// Provider disconnected
-    Disconnected {
-        provider_id: String,
-    },
+    Disconnected { provider_id: String },
     /// Reorder active workspace (from external IPC, no provider needed)
-    Reorder {
-        direction: i32,
-    },
+    Reorder { direction: i32 },
 }
 
 /// Connected provider state
@@ -184,15 +175,16 @@ impl ProviderRegistry {
     /// Detailed logging only happens on state transitions.
     pub fn any_animating(&self) -> bool {
         // Fast path: just check the flag, no collection building
-        self.providers.values().any(|p| {
-            p.render_states.values().any(|s| s.animating)
-        })
+        self.providers
+            .values()
+            .any(|p| p.render_states.values().any(|s| s.animating))
     }
 
     /// Get count of animating workspaces (for debug logging only)
     #[allow(dead_code)]
     pub fn animating_count(&self) -> usize {
-        self.providers.values()
+        self.providers
+            .values()
             .flat_map(|p| p.render_states.values())
             .filter(|s| s.animating)
             .count()
@@ -220,11 +212,14 @@ impl ProviderRegistry {
                     "Provider connected to registry"
                 );
 
-                self.providers.insert(provider_id.clone(), ProviderConnection {
-                    id: provider_id.clone(),
-                    render_states: HashMap::new(),
-                    signals: HashMap::new(),
-                });
+                self.providers.insert(
+                    provider_id.clone(),
+                    ProviderConnection {
+                        id: provider_id.clone(),
+                        render_states: HashMap::new(),
+                        signals: HashMap::new(),
+                    },
+                );
 
                 tracing::debug!(
                     provider = %provider_id,
@@ -232,7 +227,11 @@ impl ProviderRegistry {
                 );
             }
 
-            ProviderEvent::RenderUpdate { provider_id, workspace, state } => {
+            ProviderEvent::RenderUpdate {
+                provider_id,
+                workspace,
+                state,
+            } => {
                 if let Some(provider) = self.providers.get_mut(&provider_id) {
                     // TRACE not DEBUG: 60fps * workspace_count events per second
                     tracing::trace!(
@@ -275,7 +274,11 @@ impl ProviderRegistry {
                 }
             }
 
-            ProviderEvent::SignalsUpdate { provider_id, workspace, signals } => {
+            ProviderEvent::SignalsUpdate {
+                provider_id,
+                workspace,
+                signals,
+            } => {
                 if let Some(provider) = self.providers.get_mut(&provider_id) {
                     // TRACE not DEBUG: signals can update frequently
                     tracing::trace!(
@@ -296,7 +299,9 @@ impl ProviderRegistry {
             }
 
             ProviderEvent::Disconnected { provider_id } => {
-                let claimed_workspaces: Vec<_> = self.claims.iter()
+                let claimed_workspaces: Vec<_> = self
+                    .claims
+                    .iter()
                     .filter(|(_, pid)| *pid == &provider_id)
                     .map(|(ws, _)| *ws)
                     .collect();
@@ -328,9 +333,10 @@ impl ProviderRegistry {
 
 /// Get provider socket path
 pub fn socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime_dir).join("richspace").join("providers.sock")
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(runtime_dir)
+        .join("richspace")
+        .join("providers.sock")
 }
 
 /// Start the provider IPC listener
@@ -511,7 +517,10 @@ async fn handle_connection(
 
         let handle_start = Instant::now();
         match msg {
-            ProviderMessage::Register { provider_id: pid, signals } => {
+            ProviderMessage::Register {
+                provider_id: pid,
+                signals,
+            } => {
                 tracing::info!(
                     connection_id,
                     provider_id = %pid,
@@ -520,7 +529,10 @@ async fn handle_connection(
                 );
                 provider_id = Some(pid.clone());
 
-                if event_tx.send(ProviderEvent::Connected { provider_id: pid }).is_err() {
+                if event_tx
+                    .send(ProviderEvent::Connected { provider_id: pid })
+                    .is_err()
+                {
                     tracing::error!(
                         connection_id,
                         provider_id = ?provider_id,
@@ -551,11 +563,14 @@ async fn handle_connection(
                         "Full render state"
                     );
 
-                    if event_tx.send(ProviderEvent::RenderUpdate {
-                        provider_id: pid.clone(),
-                        workspace,
-                        state,
-                    }).is_err() {
+                    if event_tx
+                        .send(ProviderEvent::RenderUpdate {
+                            provider_id: pid.clone(),
+                            workspace,
+                            state,
+                        })
+                        .is_err()
+                    {
                         tracing::error!(
                             connection_id,
                             provider_id = ?provider_id,
@@ -582,11 +597,14 @@ async fn handle_connection(
                         "Signals update"
                     );
 
-                    if event_tx.send(ProviderEvent::SignalsUpdate {
-                        provider_id: pid.clone(),
-                        workspace,
-                        signals,
-                    }).is_err() {
+                    if event_tx
+                        .send(ProviderEvent::SignalsUpdate {
+                            provider_id: pid.clone(),
+                            workspace,
+                            signals,
+                        })
+                        .is_err()
+                    {
                         tracing::error!(
                             connection_id,
                             provider_id = ?provider_id,
@@ -603,7 +621,10 @@ async fn handle_connection(
                 }
             }
 
-            ProviderMessage::Reorder { workspace, direction } => {
+            ProviderMessage::Reorder {
+                workspace,
+                direction,
+            } => {
                 // Fire-and-forget reorder command from external scripts.
                 // No registration required -- any socket client can send this.
                 tracing::info!(
@@ -654,7 +675,10 @@ async fn handle_connection(
             total_duration_ms = start.elapsed().as_millis(),
             "Sending disconnect event"
         );
-        if event_tx.send(ProviderEvent::Disconnected { provider_id: pid }).is_err() {
+        if event_tx
+            .send(ProviderEvent::Disconnected { provider_id: pid })
+            .is_err()
+        {
             tracing::error!(
                 connection_id,
                 "Failed to send Disconnected event - main loop may have exited"

@@ -130,9 +130,15 @@ pub fn switch_to_workspace(number: i32) {
     if let Some(ws) = screen.get_workspace(number) {
         tracing::debug!(workspace = number, "activating workspace");
         ws.activate(0);
-        tracing::debug!(workspace = number, "switch_to_workspace END - activation requested");
+        tracing::debug!(
+            workspace = number,
+            "switch_to_workspace END - activation requested"
+        );
     } else {
-        tracing::error!(workspace = number, "switch_to_workspace END - workspace not found");
+        tracing::error!(
+            workspace = number,
+            "switch_to_workspace END - workspace not found"
+        );
     }
 }
 
@@ -143,20 +149,40 @@ pub fn switch_to_workspace(number: i32) {
 /// cache before moving so stale or foreign payloads fail closed.
 pub fn move_window_to_workspace(xid: u64, workspace_num: i32) -> bool {
     let start = std::time::Instant::now();
-    tracing::info!(xid, workspace = workspace_num, "move_window_to_workspace BEGIN");
+    tracing::info!(
+        xid,
+        workspace = workspace_num,
+        "move_window_to_workspace BEGIN"
+    );
 
     let Some(screen) = Screen::get_default() else {
-        tracing::error!(xid, workspace = workspace_num, "move window failed - no default screen");
+        tracing::error!(
+            xid,
+            workspace = workspace_num,
+            "move window failed - no default screen"
+        );
         return false;
     };
 
     let Some(workspace) = screen.get_workspace(workspace_num) else {
-        tracing::error!(xid, workspace = workspace_num, "move window failed - workspace not found");
+        tracing::error!(
+            xid,
+            workspace = workspace_num,
+            "move window failed - workspace not found"
+        );
         return false;
     };
 
-    let Some(window) = screen.get_windows().into_iter().find(|window| window.xid() == xid) else {
-        tracing::warn!(xid, workspace = workspace_num, "move window failed - window not found");
+    let Some(window) = screen
+        .get_windows()
+        .into_iter()
+        .find(|window| window.xid() == xid)
+    else {
+        tracing::warn!(
+            xid,
+            workspace = workspace_num,
+            "move window failed - window not found"
+        );
         return false;
     };
 
@@ -319,7 +345,8 @@ pub fn swap_workspace_contents(ws_a: i32, ws_b: i32) -> bool {
     }
 
     tracing::info!(
-        ws_a, ws_b,
+        ws_a,
+        ws_b,
         windows_moved = on_a.len() + on_b.len(),
         elapsed_us = start.elapsed().as_micros(),
         "swap_workspace_contents END"

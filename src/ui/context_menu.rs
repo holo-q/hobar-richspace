@@ -130,10 +130,7 @@ fn show_text_input_dialog(
         Some(title),
         parent,
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            ("OK", ResponseType::Ok),
-        ],
+        &[("Cancel", ResponseType::Cancel), ("OK", ResponseType::Ok)],
     );
 
     // Content area setup

@@ -15,12 +15,12 @@
 //! match_mode = "all"
 //! ```
 
+use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use anyhow::Result;
 
 /// How to display each workspace button
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -134,9 +134,7 @@ impl IconRule {
                     return None;
                 }
                 // Escape regex special chars in class names, join with |
-                let escaped: Vec<String> = classes.iter()
-                    .map(|c| regex::escape(c))
-                    .collect();
+                let escaped: Vec<String> = classes.iter().map(|c| regex::escape(c)).collect();
                 Some(format!("^({})$", escaped.join("|")))
             } else {
                 tracing::warn!(macro_name, "Unknown macro referenced in icon rule");
@@ -362,65 +360,80 @@ fn default_macros() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
 
     // Web browsers
-    m.insert("browser".to_string(), vec![
-        "firefox".to_string(),
-        "brave-browser".to_string(),
-        "chromium".to_string(),
-        "google-chrome".to_string(),
-        "qutebrowser".to_string(),
-        "Navigator".to_string(),  // Firefox class
-        "Chromium-browser".to_string(),
-    ]);
+    m.insert(
+        "browser".to_string(),
+        vec![
+            "firefox".to_string(),
+            "brave-browser".to_string(),
+            "chromium".to_string(),
+            "google-chrome".to_string(),
+            "qutebrowser".to_string(),
+            "Navigator".to_string(), // Firefox class
+            "Chromium-browser".to_string(),
+        ],
+    );
 
     // File managers
-    m.insert("fm".to_string(), vec![
-        "nemo".to_string(),
-        "nautilus".to_string(),
-        "thunar".to_string(),
-        "dolphin".to_string(),
-        "pcmanfm".to_string(),
-        "spacefm".to_string(),
-        "caja".to_string(),
-    ]);
+    m.insert(
+        "fm".to_string(),
+        vec![
+            "nemo".to_string(),
+            "nautilus".to_string(),
+            "thunar".to_string(),
+            "dolphin".to_string(),
+            "pcmanfm".to_string(),
+            "spacefm".to_string(),
+            "caja".to_string(),
+        ],
+    );
 
     // Terminals
-    m.insert("terminal".to_string(), vec![
-        "kitty".to_string(),
-        "alacritty".to_string(),
-        "gnome-terminal".to_string(),
-        "xterm".to_string(),
-        "konsole".to_string(),
-        "terminator".to_string(),
-        "tilix".to_string(),
-        "st".to_string(),
-    ]);
+    m.insert(
+        "terminal".to_string(),
+        vec![
+            "kitty".to_string(),
+            "alacritty".to_string(),
+            "gnome-terminal".to_string(),
+            "xterm".to_string(),
+            "konsole".to_string(),
+            "terminator".to_string(),
+            "tilix".to_string(),
+            "st".to_string(),
+        ],
+    );
 
     // Claude (AI assistant)
-    m.insert("claude".to_string(), vec![
+    m.insert(
         "claude".to_string(),
-        "Claude".to_string(),
-    ]);
+        vec!["claude".to_string(), "Claude".to_string()],
+    );
 
     // Code editors
-    m.insert("editor".to_string(), vec![
-        "code".to_string(),
-        "Code".to_string(),
-        "vscodium".to_string(),
-        "sublime_text".to_string(),
-        "atom".to_string(),
-    ]);
+    m.insert(
+        "editor".to_string(),
+        vec![
+            "code".to_string(),
+            "Code".to_string(),
+            "vscodium".to_string(),
+            "sublime_text".to_string(),
+            "atom".to_string(),
+        ],
+    );
 
     // JetBrains IDEs
-    m.insert("jetbrains".to_string(), vec![
-        "jetbrains-idea".to_string(),
-        "jetbrains-pycharm".to_string(),
-        "jetbrains-webstorm".to_string(),
-        "jetbrains-clion".to_string(),
-        "jetbrains-goland".to_string(),
-        "jetbrains-rustrover".to_string(),
-        "jetbrains-rider".to_string(),
-        "jetbrains-datagrip".to_string(),
-    ]);
+    m.insert(
+        "jetbrains".to_string(),
+        vec![
+            "jetbrains-idea".to_string(),
+            "jetbrains-pycharm".to_string(),
+            "jetbrains-webstorm".to_string(),
+            "jetbrains-clion".to_string(),
+            "jetbrains-goland".to_string(),
+            "jetbrains-rustrover".to_string(),
+            "jetbrains-rider".to_string(),
+            "jetbrains-datagrip".to_string(),
+        ],
+    );
 
     m
 }
@@ -508,10 +521,16 @@ impl Config {
         let mut added_count = 0;
         for (name, classes) in defaults {
             // Only insert if user didn't define this macro
-            if self.macros.entry(name.clone()).or_insert_with(|| {
-                added_count += 1;
-                classes.clone()
-            }).len() > 0 {
+            if self
+                .macros
+                .entry(name.clone())
+                .or_insert_with(|| {
+                    added_count += 1;
+                    classes.clone()
+                })
+                .len()
+                > 0
+            {
                 tracing::trace!(
                     macro_name = %name,
                     class_count = classes.len(),
@@ -773,7 +792,9 @@ mod tests {
         "#;
 
         #[derive(Deserialize)]
-        struct RulesWrapper { icon_rules: Vec<IconRule> }
+        struct RulesWrapper {
+            icon_rules: Vec<IconRule>,
+        }
         let wrapper: RulesWrapper = toml::from_str(toml).expect("should parse");
         assert_eq!(wrapper.icon_rules.len(), 1);
         assert_eq!(wrapper.icon_rules[0].match_mode, IconMatchMode::All);
@@ -790,7 +811,9 @@ mod tests {
         "#;
 
         #[derive(Deserialize)]
-        struct RulesWrapper { icon_rules: Vec<IconRule> }
+        struct RulesWrapper {
+            icon_rules: Vec<IconRule>,
+        }
         let wrapper: RulesWrapper = toml::from_str(toml).expect("should parse");
         assert_eq!(wrapper.icon_rules.len(), 1);
         assert!(wrapper.icon_rules[0].r#macro.is_some());
@@ -800,10 +823,10 @@ mod tests {
     #[test]
     fn test_macro_expansion() {
         let mut macros = HashMap::new();
-        macros.insert("browser".to_string(), vec![
-            "firefox".to_string(),
-            "brave-browser".to_string(),
-        ]);
+        macros.insert(
+            "browser".to_string(),
+            vec!["firefox".to_string(), "brave-browser".to_string()],
+        );
 
         let rule = IconRule {
             r#macro: Some("browser".to_string()),
@@ -817,7 +840,10 @@ mod tests {
         // Should match when all windows are browsers
         assert!(rule.matches(&["firefox".to_string()], &macros));
         assert!(rule.matches(&["brave-browser".to_string()], &macros));
-        assert!(rule.matches(&["firefox".to_string(), "brave-browser".to_string()], &macros));
+        assert!(rule.matches(
+            &["firefox".to_string(), "brave-browser".to_string()],
+            &macros
+        ));
 
         // Should NOT match when non-browser present (match_mode = all)
         assert!(!rule.matches(&["firefox".to_string(), "kitty".to_string()], &macros));

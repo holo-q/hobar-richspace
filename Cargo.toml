@@ -63,8 +63,9 @@ tracing-journald = "0.3"
 spaceship-std = { version = "0.2", path = "../../Lib/spaceship-std" }
 regex = "1.12.2"
 
-# Claude-babel for shared indicator rendering
-claude-babel = { path = "../../Daemons/claude-babel" }
+# Claude-babel for shared indicator rendering. This panel is a GTK renderer,
+# so it explicitly opts into the GTK/Cairo drawing surface.
+claude-babel = { path = "../../Daemons/claude-babel", default-features = false, features = ["gtk-render"] }
 
 [build-dependencies]
 pkg-config = "0.3"

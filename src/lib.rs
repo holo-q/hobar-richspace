@@ -18,15 +18,15 @@
 //! - DEBUG: Event flow, state changes
 //! - TRACE: Hot path details (render, animation ticks)
 
-mod xfce;
-mod wnck;
-mod config;
-mod state;
 mod app;
-mod ui;
+mod config;
 mod providers;
+mod state;
+mod ui;
+mod wnck;
+mod xfce;
 
-use xfce::{XfcePanelPluginPointer, XfcePanelPlugin};
+use xfce::{XfcePanelPlugin, XfcePanelPluginPointer};
 
 /// Entry point called by XFCE panel via C shim
 ///

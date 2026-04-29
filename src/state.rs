@@ -6,10 +6,10 @@
 //! External tools (like babel) can write to this file to rename workspaces,
 //! and the plugin will live-reload the changes.
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use anyhow::Result;
 
 /// Per-workspace display state
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -64,9 +64,10 @@ impl State {
     /// Returns $XDG_RUNTIME_DIR/richspace/state.json
     /// Falls back to /tmp/richspace/state.json if XDG_RUNTIME_DIR not set
     pub fn state_path() -> PathBuf {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .unwrap_or_else(|_| "/tmp".to_string());
-        let path = PathBuf::from(&runtime_dir).join("richspace").join("state.json");
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let path = PathBuf::from(&runtime_dir)
+            .join("richspace")
+            .join("state.json");
         tracing::trace!(
             path = %path.display(),
             runtime_dir = %runtime_dir,
@@ -250,11 +251,7 @@ impl State {
         let entry = self.workspaces.entry(key).or_default();
         entry.icon = icon.clone();
         self.version += 1;
-        tracing::trace!(
-            workspace,
-            version_after = self.version,
-            "set_icon complete"
-        );
+        tracing::trace!(workspace, version_after = self.version, "set_icon complete");
     }
 
     /// Clear state for a specific workspace (revert to defaults)
@@ -295,7 +292,8 @@ impl State {
         let state_b = self.workspaces.remove(&key_b);
 
         tracing::debug!(
-            ws_a, ws_b,
+            ws_a,
+            ws_b,
             a_had_state = state_a.is_some(),
             b_had_state = state_b.is_some(),
             "swap_ephemeral"
@@ -423,13 +421,16 @@ mod tests {
     #[test]
     fn test_workspace_state() {
         let mut state = State::default();
-        state.set(0, WorkspaceState {
-            icon: Some("🏠".to_string()),
-            label: Some("Home".to_string()),
-            tooltip: Some("Home workspace".to_string()),
-            css_class: None,
-            urgent: Some(false),
-        });
+        state.set(
+            0,
+            WorkspaceState {
+                icon: Some("🏠".to_string()),
+                label: Some("Home".to_string()),
+                tooltip: Some("Home workspace".to_string()),
+                css_class: None,
+                urgent: Some(false),
+            },
+        );
 
         assert_eq!(state.get(0).unwrap().icon, Some("🏠".to_string()));
         assert_eq!(state.get(0).unwrap().label, Some("Home".to_string()));
@@ -454,7 +455,7 @@ mod tests {
         let ws = state.get(0).unwrap();
 
         assert_eq!(ws.icon, Some("🏠".to_string()));
-        assert_eq!(ws.label, None);  // Missing fields default to None
+        assert_eq!(ws.label, None); // Missing fields default to None
         assert_eq!(ws.urgent, None);
     }
 
@@ -573,16 +574,22 @@ mod tests {
     #[test]
     fn test_swap_ephemeral_both_have_state() {
         let mut state = State::default();
-        state.set(0, WorkspaceState {
-            label: Some("Home".to_string()),
-            icon: Some("H".to_string()),
-            ..Default::default()
-        });
-        state.set(1, WorkspaceState {
-            label: Some("Code".to_string()),
-            icon: Some("C".to_string()),
-            ..Default::default()
-        });
+        state.set(
+            0,
+            WorkspaceState {
+                label: Some("Home".to_string()),
+                icon: Some("H".to_string()),
+                ..Default::default()
+            },
+        );
+        state.set(
+            1,
+            WorkspaceState {
+                label: Some("Code".to_string()),
+                icon: Some("C".to_string()),
+                ..Default::default()
+            },
+        );
         let v_before = state.version;
         state.swap_ephemeral(0, 1);
         assert_eq!(state.get(0).unwrap().label, Some("Code".to_string()));
@@ -595,10 +602,13 @@ mod tests {
     #[test]
     fn test_swap_ephemeral_one_empty() {
         let mut state = State::default();
-        state.set(0, WorkspaceState {
-            label: Some("Home".to_string()),
-            ..Default::default()
-        });
+        state.set(
+            0,
+            WorkspaceState {
+                label: Some("Home".to_string()),
+                ..Default::default()
+            },
+        );
         // Workspace 1 has no state
         state.swap_ephemeral(0, 1);
         assert!(state.get(0).is_none()); // Was empty, stays empty (no entry)
@@ -608,10 +618,13 @@ mod tests {
     #[test]
     fn test_swap_ephemeral_noop_same() {
         let mut state = State::default();
-        state.set(0, WorkspaceState {
-            label: Some("Home".to_string()),
-            ..Default::default()
-        });
+        state.set(
+            0,
+            WorkspaceState {
+                label: Some("Home".to_string()),
+                ..Default::default()
+            },
+        );
         let v_before = state.version;
         state.swap_ephemeral(0, 0);
         assert_eq!(state.version, v_before); // No version bump for noop

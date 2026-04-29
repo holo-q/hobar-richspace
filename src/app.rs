@@ -7,19 +7,19 @@ use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::xfce::XfcePanelPlugin;
 use crate::config::Config;
-use crate::state::State;
-use crate::wnck::{self, WorkspaceInfo};
-use crate::ui::WorkspaceWidget;
 use crate::providers::{self, ProviderEvent, ProviderRegistry};
+use crate::state::State;
+use crate::ui::WorkspaceWidget;
+use crate::wnck::{self, WorkspaceInfo};
+use crate::xfce::XfcePanelPlugin;
 
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Application events
 #[derive(Debug)]
@@ -45,9 +45,15 @@ pub enum AppEvent {
     /// User scrolled mouse wheel on workspace widget
     ScrollWorkspace { delta: i32, wrap: bool },
     /// Set custom label for a workspace (None = clear)
-    SetWorkspaceLabel { workspace: i32, label: Option<String> },
+    SetWorkspaceLabel {
+        workspace: i32,
+        label: Option<String>,
+    },
     /// Set custom icon for a workspace (None = clear)
-    SetWorkspaceIcon { workspace: i32, icon: Option<String> },
+    SetWorkspaceIcon {
+        workspace: i32,
+        icon: Option<String>,
+    },
     /// Clear all customizations for a workspace
     ClearWorkspaceCustomizations { workspace: i32 },
     /// Reorder: move active workspace left/right in display order
@@ -89,8 +95,8 @@ pub struct App {
     _config_watcher: Option<RecommendedWatcher>,
     /// Animation tick source (60fps when providers are animating)
     animation_source: Option<glib::SourceId>,
-    /// Last time provider triggered a full render (for throttling)
-    /// Provider dots need widget rebuild, but 60fps is excessive - 20fps is smooth enough
+    /// Last time provider triggered a full render (for throttling).
+    /// Seeded in the past so babel's initial payload is not swallowed by startup throttling.
     last_provider_render: Instant,
     /// Shutdown signal for background watcher threads
     /// Set to true on cleanup to gracefully stop file watchers before plugin unload
@@ -163,7 +169,10 @@ impl App {
         let widget = WorkspaceWidget::new(&app_state.borrow(), tx.clone());
         plugin.container.add(widget.widget());
         plugin.add_action_widget(widget.widget());
-        tracing::debug!(elapsed_ms = start.elapsed().as_millis(), "widget created and added");
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "widget created and added"
+        );
 
         // Show configure in menu
         plugin.menu_show_configure();
@@ -174,7 +183,11 @@ impl App {
         // Set up file watchers for live reload
         tracing::debug!("setting up file watchers");
         let state_watcher = Self::setup_state_watcher(tx.clone(), shutdown.clone());
-        let config_watcher = Self::setup_config_watcher(tx.clone(), app_state.borrow().config_path.clone(), shutdown.clone());
+        let config_watcher = Self::setup_config_watcher(
+            tx.clone(),
+            app_state.borrow().config_path.clone(),
+            shutdown.clone(),
+        );
         tracing::debug!(
             state_watcher = state_watcher.is_some(),
             config_watcher = config_watcher.is_some(),
@@ -185,7 +198,8 @@ impl App {
         tracing::debug!("starting provider IPC listener");
         {
             let tx = tx.clone();
-            let (provider_tx, provider_rx) = glib::MainContext::channel::<ProviderEvent>(glib::Priority::DEFAULT);
+            let (provider_tx, provider_rx) =
+                glib::MainContext::channel::<ProviderEvent>(glib::Priority::DEFAULT);
 
             // Bridge provider events to main event loop.
             // Reorder events short-circuit to AppEvent::ReorderActiveWorkspace
@@ -194,7 +208,10 @@ impl App {
             provider_rx.attach(None, move |event| {
                 match event {
                     ProviderEvent::Reorder { direction } => {
-                        tracing::debug!(direction, "provider IPC reorder -> AppEvent::ReorderActiveWorkspace");
+                        tracing::debug!(
+                            direction,
+                            "provider IPC reorder -> AppEvent::ReorderActiveWorkspace"
+                        );
                         tx.send(AppEvent::ReorderActiveWorkspace { direction }).ok();
                     }
                     other => {
@@ -208,7 +225,10 @@ impl App {
             // Start the listener (runs in background thread with tokio)
             providers::start_listener(provider_tx);
         }
-        tracing::debug!(elapsed_ms = start.elapsed().as_millis(), "provider listener started");
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "provider listener started"
+        );
 
         // Create app
         tracing::debug!("creating App instance");
@@ -220,7 +240,7 @@ impl App {
             _state_watcher: state_watcher,
             _config_watcher: config_watcher,
             animation_source: None,
-            last_provider_render: Instant::now(),
+            last_provider_render: Instant::now() - Duration::from_millis(200),
             shutdown,
         }));
 
@@ -258,10 +278,12 @@ impl App {
         tracing::debug!("connecting panel signals");
         {
             let tx = tx.clone();
-            app.borrow().plugin.connect_orientation_changed(move |orientation| {
-                tracing::debug!(?orientation, "panel: orientation_changed signal");
-                tx.send(AppEvent::OrientationChanged(orientation)).ok();
-            });
+            app.borrow()
+                .plugin
+                .connect_orientation_changed(move |orientation| {
+                    tracing::debug!(?orientation, "panel: orientation_changed signal");
+                    tx.send(AppEvent::OrientationChanged(orientation)).ok();
+                });
         }
         {
             let tx = tx.clone();
@@ -324,7 +346,10 @@ impl App {
     /// Set up file watcher for state live reload
     ///
     /// Background thread checks shutdown flag every 100ms to allow graceful exit.
-    fn setup_state_watcher(tx: glib::Sender<AppEvent>, shutdown: Arc<AtomicBool>) -> Option<RecommendedWatcher> {
+    fn setup_state_watcher(
+        tx: glib::Sender<AppEvent>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Option<RecommendedWatcher> {
         let state_path = State::state_path();
 
         // Create parent directory if it doesn't exist
@@ -388,9 +413,10 @@ impl App {
                         }
 
                         // Check if this event is for our state file
-                        let is_state_file = event.paths.iter().any(|p| {
-                            p.file_name() == state_path_clone.file_name()
-                        });
+                        let is_state_file = event
+                            .paths
+                            .iter()
+                            .any(|p| p.file_name() == state_path_clone.file_name());
 
                         if !is_state_file {
                             continue;
@@ -427,7 +453,11 @@ impl App {
     /// Watches the config TOML file for changes, enabling live editing of
     /// icon rules, macros, and display settings without panel restart.
     /// Background thread checks shutdown flag every 100ms to allow graceful exit.
-    fn setup_config_watcher(tx: glib::Sender<AppEvent>, config_path: Option<PathBuf>, shutdown: Arc<AtomicBool>) -> Option<RecommendedWatcher> {
+    fn setup_config_watcher(
+        tx: glib::Sender<AppEvent>,
+        config_path: Option<PathBuf>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Option<RecommendedWatcher> {
         let config_path = config_path?;
 
         // Get the TOML path (config might be stored as .toml)
@@ -488,9 +518,10 @@ impl App {
                         }
 
                         // Check if this event is for our config file
-                        let is_config_file = event.paths.iter().any(|p| {
-                            p.file_name() == toml_path_clone.file_name()
-                        });
+                        let is_config_file = event
+                            .paths
+                            .iter()
+                            .any(|p| p.file_name() == toml_path_clone.file_name());
 
                         if !is_config_file {
                             continue;
@@ -542,13 +573,17 @@ impl App {
         match event {
             AppEvent::WorkspacesChanged => {
                 // Refresh workspace info - full rebuild needed (workspace added/removed)
-                tracing::info!(trigger = "workspaces_changed", "SIGNAL IN - workspace count changed");
+                tracing::info!(
+                    trigger = "workspaces_changed",
+                    "SIGNAL IN - workspace count changed"
+                );
                 let t0 = Instant::now();
                 {
                     let mut state_borrow = self.app_state.borrow_mut();
                     state_borrow.workspaces = wnck::get_workspaces();
                     // Reconcile display order with new workspace set
-                    let ws_numbers: Vec<i32> = state_borrow.workspaces.iter().map(|w| w.number).collect();
+                    let ws_numbers: Vec<i32> =
+                        state_borrow.workspaces.iter().map(|w| w.number).collect();
                     state_borrow.state.reconcile_display_order(&ws_numbers);
                 }
                 let t1 = Instant::now();
@@ -565,7 +600,10 @@ impl App {
             AppEvent::ActiveWorkspaceChanged => {
                 // Light update - just refresh active state, no widget rebuild
                 // This is the fast path for workspace switching
-                tracing::info!(trigger = "active_workspace_changed", "SIGNAL IN - workspace switch");
+                tracing::info!(
+                    trigger = "active_workspace_changed",
+                    "SIGNAL IN - workspace switch"
+                );
                 let t0 = Instant::now();
 
                 // Scope borrows carefully - GTK callbacks during update_active can trigger
@@ -574,7 +612,9 @@ impl App {
                     let mut state = self.app_state.borrow_mut();
                     state.workspaces = wnck::get_workspaces();
                     let t1 = Instant::now();
-                    let active = state.workspaces.iter()
+                    let active = state
+                        .workspaces
+                        .iter()
                         .find(|ws| ws.is_active)
                         .map(|ws| ws.number);
                     (active, t1)
@@ -592,7 +632,10 @@ impl App {
             }
             AppEvent::StateFileChanged => {
                 // Reload state from file
-                tracing::info!(trigger = "state_file_changed", "SIGNAL IN - state file modified");
+                tracing::info!(
+                    trigger = "state_file_changed",
+                    "SIGNAL IN - state file modified"
+                );
                 match State::load() {
                     Ok(new_state) => {
                         let ws_count = new_state.workspaces.len();
@@ -613,7 +656,10 @@ impl App {
             }
             AppEvent::ConfigFileChanged => {
                 // Hot reload config (icon rules, macros, display settings)
-                tracing::info!(trigger = "config_file_changed", "SIGNAL IN - config file modified");
+                tracing::info!(
+                    trigger = "config_file_changed",
+                    "SIGNAL IN - config file modified"
+                );
                 if let Some(ref path) = self.app_state.borrow().config_path.clone() {
                     match Config::load(&path) {
                         Ok(new_config) => {
@@ -644,7 +690,10 @@ impl App {
             }
             AppEvent::ProviderUpdate(ref provider_event) => {
                 // Update provider registry
-                self.app_state.borrow_mut().providers.handle_event(provider_event.clone());
+                self.app_state
+                    .borrow_mut()
+                    .providers
+                    .handle_event(provider_event.clone());
 
                 // Throttle full renders to 5fps (200ms interval)
                 // Provider dots require widget rebuild which is expensive (~50ms)
@@ -710,7 +759,8 @@ impl App {
                 let display_order = state.state.effective_display_order(count);
 
                 // Find current workspace's display position
-                let current_pos = display_order.iter()
+                let current_pos = display_order
+                    .iter()
                     .position(|&n| n == current)
                     .unwrap_or(0) as i32;
                 let count_i32 = count as i32;
@@ -737,10 +787,16 @@ impl App {
                 drop(state);
                 wnck::switch_to_workspace(next_ws);
             }
-            AppEvent::SetWorkspaceLabel { workspace, ref label } => {
+            AppEvent::SetWorkspaceLabel {
+                workspace,
+                ref label,
+            } => {
                 tracing::debug!(workspace, label = ?label, "set workspace label");
                 // Update ephemeral state with custom label
-                self.app_state.borrow_mut().state.set_label(workspace, label.clone());
+                self.app_state
+                    .borrow_mut()
+                    .state
+                    .set_label(workspace, label.clone());
                 // Save to disk (for external tools and persistence)
                 if let Err(e) = self.app_state.borrow().state.save() {
                     tracing::error!(error = %e, "failed to save state");
@@ -748,10 +804,16 @@ impl App {
                 // Render immediately (don't wait for file watcher)
                 self.widget.render(&self.app_state.borrow());
             }
-            AppEvent::SetWorkspaceIcon { workspace, ref icon } => {
+            AppEvent::SetWorkspaceIcon {
+                workspace,
+                ref icon,
+            } => {
                 tracing::debug!(workspace, icon = ?icon, "set workspace icon");
                 // Update ephemeral state with custom icon
-                self.app_state.borrow_mut().state.set_icon(workspace, icon.clone());
+                self.app_state
+                    .borrow_mut()
+                    .state
+                    .set_icon(workspace, icon.clone());
                 // Save to disk
                 if let Err(e) = self.app_state.borrow().state.save() {
                     tracing::error!(error = %e, "failed to save state");
@@ -774,7 +836,9 @@ impl App {
                 tracing::info!(direction, "SIGNAL IN - reorder active workspace");
                 // Clamp IPC direction to valid range — external callers could send any i32
                 let direction = direction.clamp(-1, 1);
-                if direction == 0 { return; }
+                if direction == 0 {
+                    return;
+                }
                 let active = wnck::active_workspace_number().unwrap_or(0);
                 let mut state = self.app_state.borrow_mut();
                 let ws_count = state.workspaces.len();
@@ -811,12 +875,15 @@ impl App {
                             // Switch to the target workspace so the user follows their windows
                             wnck::switch_to_workspace(other_ws);
                             tracing::info!(
-                                direction, active_ws = active, target_ws = other_ws,
+                                direction,
+                                active_ws = active,
+                                target_ws = other_ws,
                                 "RENDER OUT - true reorder (windows swapped)"
                             );
                         } else {
                             tracing::warn!(
-                                active_ws = active, target_ws = other_ws,
+                                active_ws = active,
+                                target_ws = other_ws,
                                 "true reorder aborted — window swap failed"
                             );
                         }
@@ -831,7 +898,8 @@ impl App {
                             drop(state);
                             self.widget.reorder_animate(&self.app_state.borrow());
                             tracing::info!(
-                                direction, active_ws = active,
+                                direction,
+                                active_ws = active,
                                 "RENDER OUT - virtual reorder (display order swapped)"
                             );
                         } else {
@@ -859,8 +927,15 @@ impl App {
                     // Display order stays identity -- the actual windows move.
                     // For drag, from_pos and to_pos are display positions.
                     // Bounds check: DnD positions can be stale after workspace add/remove
-                    if from_pos >= state.state.display_order.len() || to_pos >= state.state.display_order.len() {
-                        tracing::warn!(from_pos, to_pos, len = state.state.display_order.len(), "DnD reorder out of bounds");
+                    if from_pos >= state.state.display_order.len()
+                        || to_pos >= state.state.display_order.len()
+                    {
+                        tracing::warn!(
+                            from_pos,
+                            to_pos,
+                            len = state.state.display_order.len(),
+                            "DnD reorder out of bounds"
+                        );
                         return;
                     }
                     let ws_from = state.state.display_order[from_pos];
@@ -880,12 +955,16 @@ impl App {
                         // Full render to reflect the swapped window contents
                         self.widget.render(&self.app_state.borrow());
                         tracing::info!(
-                            from_pos, to_pos, ws_from, ws_to,
+                            from_pos,
+                            to_pos,
+                            ws_from,
+                            ws_to,
                             "RENDER OUT - true reorder drag (windows swapped)"
                         );
                     } else {
                         tracing::warn!(
-                            ws_from, ws_to,
+                            ws_from,
+                            ws_to,
                             "true reorder drag aborted — window swap failed"
                         );
                     }
@@ -898,13 +977,18 @@ impl App {
                     drop(state);
                     self.widget.reorder_animate(&self.app_state.borrow());
                     tracing::info!(
-                        from_pos, to_pos,
+                        from_pos,
+                        to_pos,
                         "RENDER OUT - virtual reorder drag (display order changed)"
                     );
                 }
             }
             AppEvent::MoveWindowToWorkspace { xid, workspace } => {
-                tracing::info!(xid, workspace, "SIGNAL IN - move dragged window to workspace");
+                tracing::info!(
+                    xid,
+                    workspace,
+                    "SIGNAL IN - move dragged window to workspace"
+                );
                 if wnck::move_window_to_workspace(xid, workspace) {
                     {
                         let mut state = self.app_state.borrow_mut();
@@ -946,10 +1030,7 @@ impl App {
                     "SLOW: Event took >50ms"
                 );
             } else {
-                tracing::debug!(
-                    elapsed_us = elapsed.as_micros(),
-                    "handle_event END"
-                );
+                tracing::debug!(elapsed_us = elapsed.as_micros(), "handle_event END");
             }
         }
     }
