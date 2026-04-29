@@ -55,6 +55,8 @@ pub enum AppEvent {
     ReorderActiveWorkspace { direction: i32 },
     /// Reorder: move workspace from one display position to another (drag-and-drop)
     ReorderWorkspace { from_pos: usize, to_pos: usize },
+    /// Move a dragged tasklist/window-button window onto a workspace.
+    MoveWindowToWorkspace { xid: u64, workspace: i32 },
     /// Open configuration dialog
     Configure,
     /// Save configuration
@@ -899,6 +901,19 @@ impl App {
                         from_pos, to_pos,
                         "RENDER OUT - virtual reorder drag (display order changed)"
                     );
+                }
+            }
+            AppEvent::MoveWindowToWorkspace { xid, workspace } => {
+                tracing::info!(xid, workspace, "SIGNAL IN - move dragged window to workspace");
+                if wnck::move_window_to_workspace(xid, workspace) {
+                    {
+                        let mut state = self.app_state.borrow_mut();
+                        state.workspaces = wnck::get_workspaces();
+                    }
+                    self.widget.render(&self.app_state.borrow());
+                    tracing::info!(xid, workspace, "RENDER OUT - dragged window moved");
+                } else {
+                    tracing::warn!(xid, workspace, "dragged window move failed");
                 }
             }
             AppEvent::Configure => {

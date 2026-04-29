@@ -36,6 +36,9 @@ use crate::providers::RenderState;
 use super::animation::AnimationEngine;
 use super::context_menu::build_workspace_menu;
 
+const WORKSPACE_DND_TARGET: &str = "application/x-richspace-workspace";
+const XFCE_WINDOW_DND_TARGET: &str = "application/x-wnck-window-id";
+
 /// Persistent state for a single workspace button
 ///
 /// Stores widget references for in-place updates without recreation.
@@ -234,27 +237,12 @@ impl WorkspaceWidget {
         let ws_map: std::collections::HashMap<i32, &crate::wnck::WorkspaceInfo> =
             state.workspaces.iter().map(|ws| (ws.number, ws)).collect();
 
-        // Create buttons in display order and measure widths
-        let orientation = *self.orientation.borrow();
-        let spacing = state.config.spacing as f64;
-        let mut widths: Vec<f64> = Vec::new();
         let mut new_buttons: Vec<ButtonState> = Vec::new();
 
         for (display_pos, &ws_num) in display_order.iter().enumerate() {
             if let Some(ws) = ws_map.get(&ws_num) {
                 let render_state = state.providers.get_render_state(ws.number).cloned();
                 let button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone(), display_pos);
-
-                // Measure preferred size before adding to container
-                // GTK computes natural size from widget content (labels, padding, CSS)
-                let width = if orientation == gtk::Orientation::Horizontal {
-                    let (_, natural) = button_state.button.preferred_width();
-                    natural.max(1) as f64  // Sanity: at least 1px
-                } else {
-                    let (_, natural) = button_state.button.preferred_height();
-                    natural.max(1) as f64
-                };
-                widths.push(width);
 
                 // Add to container at (0,0) initially — position_buttons will fix it
                 self.container.put(&button_state.button, 0, 0);
@@ -264,12 +252,8 @@ impl WorkspaceWidget {
 
         *self.buttons.borrow_mut() = new_buttons;
 
-        // Calculate positions and apply instantly (no animation on rebuild)
-        let positions = AnimationEngine::compute_positions(&widths, spacing);
-        self.animation.borrow_mut().set_targets(&positions, true);
-        self.apply_positions(state);
-
         self.container.show_all();
+        self.relayout_instant(state);
 
         tracing::debug!(
             elapsed_us = start.elapsed().as_micros(),
@@ -348,7 +332,7 @@ impl WorkspaceWidget {
         // Solution: convert to Option vec and take() each entry.
         let mut old_options: Vec<Option<ButtonState>> = old_buttons.into_iter().map(Some).collect();
         for (new_pos, &old_idx) in new_indices.iter().enumerate() {
-            if let Some(mut bs) = old_options[old_idx].take() {
+            if let Some(bs) = old_options[old_idx].take() {
                 bs.display_position.set(new_pos);
                 buttons.push(bs);
             }
@@ -383,7 +367,7 @@ impl WorkspaceWidget {
         self.start_animation_tick();
 
         // Also update button state (CSS classes, labels, etc.)
-        self.update_state_inner(state);
+        self.update_state_inner(state, false);
 
         tracing::debug!(
             elapsed_us = start.elapsed().as_micros(),
@@ -396,11 +380,11 @@ impl WorkspaceWidget {
     /// CHEAP (~0.1ms) - Use for active workspace changes, rule matches, urgency, etc.
     /// Matches buttons by workspace_number (display-order-safe).
     pub fn update_state(&self, state: &AppState) {
-        self.update_state_inner(state);
+        self.update_state_inner(state, true);
     }
 
     /// Inner update_state implementation (avoids borrow issues when called from reorder_animate)
-    fn update_state_inner(&self, state: &AppState) {
+    fn update_state_inner(&self, state: &AppState, relayout: bool) {
         let start = Instant::now();
         let buttons = self.buttons.borrow();
 
@@ -493,6 +477,11 @@ impl WorkspaceWidget {
             button_count = buttons.len(),
             "update_state complete"
         );
+        drop(buttons);
+
+        if relayout {
+            self.relayout_instant(state);
+        }
     }
 
     /// Update dots only - just mutates render state and queues redraw
@@ -567,6 +556,42 @@ impl WorkspaceWidget {
         } else {
             self.container.set_size_request(state.size, total);
         }
+    }
+
+    fn measure_button_extents(&self) -> Vec<f64> {
+        let buttons = self.buttons.borrow();
+        let orientation = *self.orientation.borrow();
+
+        buttons.iter().map(|bs| {
+            let allocated = if orientation == gtk::Orientation::Horizontal {
+                bs.button.allocated_width()
+            } else {
+                bs.button.allocated_height()
+            };
+            let (_, natural) = if orientation == gtk::Orientation::Horizontal {
+                bs.button.preferred_width()
+            } else {
+                bs.button.preferred_height()
+            };
+
+            // GTK can report tiny preferred sizes before a newly inserted child has
+            // settled. Keep the old allocation as a floor so Fixed positions do not
+            // collapse into a pile of 1px-wide buttons.
+            natural.max(allocated).max(1) as f64
+        }).collect()
+    }
+
+    fn relayout_instant(&self, state: &AppState) {
+        let spacing = state.config.spacing as f64;
+        let widths = self.measure_button_extents();
+        let positions = AnimationEngine::compute_positions(&widths, spacing);
+        self.animation.borrow_mut().set_targets(&positions, true);
+        self.apply_positions(state);
+
+        tracing::trace!(
+            widths = ?widths,
+            "workspace button layout recalculated"
+        );
     }
 
     /// Start the animation tick (60fps position updates)
@@ -889,11 +914,10 @@ impl WorkspaceWidget {
         // after reorder_animate() updates it, avoiding stale DnD indices.
         let display_pos_cell = Rc::new(Cell::new(display_pos));
 
-        let target_entries = &[gtk::TargetEntry::new(
-            "application/x-richspace-workspace",
-            gtk::TargetFlags::SAME_APP,
-            0,
-        )];
+        let target_entries = &[
+            gtk::TargetEntry::new(WORKSPACE_DND_TARGET, gtk::TargetFlags::SAME_APP, 0),
+            gtk::TargetEntry::new(XFCE_WINDOW_DND_TARGET, gtk::TargetFlags::SAME_APP, 1),
+        ];
 
         button.drag_source_set(
             gdk::ModifierType::BUTTON1_MASK,
@@ -902,10 +926,11 @@ impl WorkspaceWidget {
         );
 
         button.drag_dest_set(
-            gtk::DestDefaults::all(),
+            gtk::DestDefaults::empty(),
             target_entries,
             gdk::DragAction::MOVE,
         );
+        button.drag_dest_set_track_motion(true);
 
         // Drag begin: visual feedback — dim the source button
         {
@@ -922,27 +947,197 @@ impl WorkspaceWidget {
             let pos = display_pos_cell.clone();
             button.connect_drag_data_get(move |_, _, selection_data, _, _| {
                 let pos_str = pos.get().to_string();
+                tracing::debug!(display_pos = pos.get(), "DnD drag-data-get");
                 let _ = selection_data.set_text(&pos_str);
             });
         }
 
-        // Receive drop: fire reorder event when a different button lands here
+        // Destination lifecycle: manually accept only typed, intentional drags.
+        // XFCE panel plugins share one process, so SAME_APP is not enough isolation;
+        // tasklist/window-button drags are same-process and intentionally supported,
+        // but unrelated panel-plugin drags must still be rejected. Every accepted
+        // drop must be explicitly finished so GTK's pointer grab cannot outlive the
+        // DnD transaction.
+        {
+            let button_clone = button.clone();
+            let pos = display_pos_cell.clone();
+            button.connect_drag_motion(move |widget, context, x, y, time| {
+                let target = widget.drag_dest_find_target(context, None);
+                let target_name = target.map(|target| target.name().to_string());
+                let accepted = match target_name.as_deref() {
+                    Some(WORKSPACE_DND_TARGET) => Self::is_richspace_drag(context),
+                    Some(XFCE_WINDOW_DND_TARGET) => true,
+                    _ => false,
+                };
+
+                tracing::trace!(
+                    display_pos = pos.get(),
+                    x,
+                    y,
+                    time,
+                    target = ?target_name,
+                    accepted,
+                    "DnD drag-motion"
+                );
+
+                if accepted {
+                    button_clone.style_context().add_class("drag-over");
+                    context.drag_status(gdk::DragAction::MOVE, time);
+                    true
+                } else {
+                    button_clone.style_context().remove_class("drag-over");
+                    context.drag_status(gdk::DragAction::empty(), time);
+                    false
+                }
+            });
+        }
+
+        {
+            let button_clone = button.clone();
+            let pos = display_pos_cell.clone();
+            button.connect_drag_drop(move |widget, context, x, y, time| {
+                let target = widget.drag_dest_find_target(context, None);
+                let target_name = target.map(|target| target.name().to_string());
+                let accepted = match target_name.as_deref() {
+                    Some(WORKSPACE_DND_TARGET) => Self::is_richspace_drag(context),
+                    Some(XFCE_WINDOW_DND_TARGET) => true,
+                    _ => false,
+                };
+
+                tracing::debug!(
+                    display_pos = pos.get(),
+                    x,
+                    y,
+                    time,
+                    target = ?target_name,
+                    accepted,
+                    "DnD drag-drop"
+                );
+
+                if accepted {
+                    if let Some(target) = target {
+                        widget.drag_get_data(context, &target, time);
+                    } else {
+                        button_clone.style_context().remove_class("drag-over");
+                        context.drag_finish(false, false, time);
+                    }
+                    true
+                } else {
+                    button_clone.style_context().remove_class("drag-over");
+                    context.drag_finish(false, false, time);
+                    true
+                }
+            });
+        }
+
+        {
+            let button_clone = button.clone();
+            let pos = display_pos_cell.clone();
+            button.connect_drag_leave(move |_, _, time| {
+                button_clone.style_context().remove_class("drag-over");
+                tracing::trace!(display_pos = pos.get(), time, "DnD drag-leave");
+            });
+        }
+
+        // Receive drop: parse the typed payload, finish the GTK drop immediately,
+        // then defer reorder/window-move work so any WNCK mutations run after GTK
+        // has unwound the DnD grab lifecycle. XFCE tasklist sends a native gulong
+        // XID for `application/x-wnck-window-id`.
         {
             let tx_dnd = self.tx.clone();
+            let button_clone = button.clone();
             let pos = display_pos_cell.clone();
-            button.connect_drag_data_received(move |_, _, _, _, selection_data, _, _| {
-                if let Some(text) = selection_data.text() {
-                    if let Ok(from_pos) = text.parse::<usize>() {
-                        let to_pos = pos.get();
-                        if from_pos != to_pos {
-                            tracing::debug!(from_pos, to_pos, "DnD reorder event");
-                            tx_dnd.send(AppEvent::ReorderWorkspace {
-                                from_pos,
-                                to_pos,
-                            }).ok();
+            button.connect_drag_data_received(move |_, context, x, y, selection_data, info, time| {
+                button_clone.style_context().remove_class("drag-over");
+                let target = selection_data.target().name().to_string();
+
+                let to_pos = pos.get();
+                let (success, deferred_event) = match target.as_str() {
+                    WORKSPACE_DND_TARGET => {
+                        let mut parsed = None;
+                        if let Some(text) = selection_data.text() {
+                            match text.parse::<usize>() {
+                                Ok(from_pos) => parsed = Some(from_pos),
+                                Err(error) => {
+                                    tracing::warn!(target = %target, payload = %text, %error, "DnD workspace payload parse failed");
+                                }
+                            }
+                        } else {
+                            tracing::warn!(target = %target, "DnD workspace payload missing text");
+                        }
+
+                        let event = parsed.and_then(|from_pos| {
+                            if from_pos == to_pos {
+                                tracing::debug!(from_pos, to_pos, "DnD reorder skipped - same position");
+                                None
+                            } else {
+                                Some(AppEvent::ReorderWorkspace { from_pos, to_pos })
+                            }
+                        });
+                        (event.is_some() || parsed.is_some(), event)
+                    }
+                    XFCE_WINDOW_DND_TARGET => {
+                        match Self::parse_tasklist_window_id(selection_data) {
+                            Some(xid) => (
+                                true,
+                                Some(AppEvent::MoveWindowToWorkspace {
+                                    xid,
+                                    workspace: ws_number,
+                                }),
+                            ),
+                            None => {
+                                tracing::warn!(
+                                    target = %target,
+                                    format = selection_data.format(),
+                                    length = selection_data.length(),
+                                    bytes = ?selection_data.data(),
+                                    "DnD window payload parse failed"
+                                );
+                                (false, None)
+                            }
                         }
                     }
+                    _ => {
+                        tracing::warn!(target = %target, "DnD unsupported target received");
+                        (false, None)
+                    }
+                };
+
+                context.drag_finish(success, false, time);
+                tracing::debug!(
+                    target = %target,
+                    to_pos,
+                    workspace = ws_number,
+                    x,
+                    y,
+                    info,
+                    time,
+                    success,
+                    "DnD drag-data-received finished"
+                );
+
+                if let Some(event) = deferred_event {
+                    let tx = tx_dnd.clone();
+                    glib::idle_add_local_once(move || {
+                        tracing::debug!(event = ?event, "DnD deferred event");
+                        tx.send(event).ok();
+                    });
                 }
+            });
+        }
+
+        {
+            let button_clone = button.clone();
+            let pos = display_pos_cell.clone();
+            button.connect_drag_failed(move |_, _, result| {
+                button_clone.style_context().remove_class("dragging");
+                button_clone.style_context().remove_class("drag-over");
+                tracing::warn!(
+                    display_pos = pos.get(),
+                    ?result,
+                    "DnD drag-failed cleanup"
+                );
+                Propagation::Proceed
             });
         }
 
@@ -951,6 +1146,7 @@ impl WorkspaceWidget {
             let button_clone2 = button.clone();
             button.connect_drag_end(move |_, _| {
                 button_clone2.style_context().remove_class("dragging");
+                button_clone2.style_context().remove_class("drag-over");
                 tracing::debug!("DnD drag-end cleanup");
             });
         }
@@ -970,6 +1166,29 @@ impl WorkspaceWidget {
     // =========================================================================
     // CSS MANAGEMENT
     // =========================================================================
+
+    fn is_richspace_drag(context: &gdk::DragContext) -> bool {
+        context
+            .drag_get_source_widget()
+            .map(|widget| widget.style_context().has_class("richspace-button"))
+            .unwrap_or(false)
+    }
+
+    fn parse_tasklist_window_id(selection_data: &gtk::SelectionData) -> Option<u64> {
+        let data = selection_data.data();
+
+        if data.len() >= std::mem::size_of::<usize>() {
+            let mut bytes = [0u8; std::mem::size_of::<usize>()];
+            bytes.copy_from_slice(&data[..std::mem::size_of::<usize>()]);
+            Some(usize::from_ne_bytes(bytes) as u64)
+        } else if data.len() >= std::mem::size_of::<u32>() {
+            let mut bytes = [0u8; std::mem::size_of::<u32>()];
+            bytes.copy_from_slice(&data[..std::mem::size_of::<u32>()]);
+            Some(u32::from_ne_bytes(bytes) as u64)
+        } else {
+            None
+        }
+    }
 
     fn apply_default_css(&self, state: &AppState) {
         let start = Instant::now();

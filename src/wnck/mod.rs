@@ -136,6 +136,49 @@ pub fn switch_to_workspace(number: i32) {
     }
 }
 
+/// Move a window, identified by its X11 XID, to the given workspace.
+///
+/// XFCE's tasklist DnD source exports `application/x-wnck-window-id` as the
+/// native `gulong` window id. Resolve that id through WNCK's current window
+/// cache before moving so stale or foreign payloads fail closed.
+pub fn move_window_to_workspace(xid: u64, workspace_num: i32) -> bool {
+    let start = std::time::Instant::now();
+    tracing::info!(xid, workspace = workspace_num, "move_window_to_workspace BEGIN");
+
+    let Some(screen) = Screen::get_default() else {
+        tracing::error!(xid, workspace = workspace_num, "move window failed - no default screen");
+        return false;
+    };
+
+    let Some(workspace) = screen.get_workspace(workspace_num) else {
+        tracing::error!(xid, workspace = workspace_num, "move window failed - workspace not found");
+        return false;
+    };
+
+    let Some(window) = screen.get_windows().into_iter().find(|window| window.xid() == xid) else {
+        tracing::warn!(xid, workspace = workspace_num, "move window failed - window not found");
+        return false;
+    };
+
+    if window.is_sticky() || window.is_pinned() {
+        tracing::warn!(
+            xid,
+            workspace = workspace_num,
+            "move window skipped - sticky/pinned windows are not workspace-bound"
+        );
+        return false;
+    }
+
+    window.move_to_workspace(&workspace);
+    tracing::info!(
+        xid,
+        workspace = workspace_num,
+        elapsed_us = start.elapsed().as_micros(),
+        "move_window_to_workspace END"
+    );
+    true
+}
+
 /// Connect to workspace-changed signal (active workspace changed)
 pub fn connect_active_workspace_changed<F: Fn() + 'static>(f: F) {
     tracing::debug!("connect_active_workspace_changed - registering signal handler");
