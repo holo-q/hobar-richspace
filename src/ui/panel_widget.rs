@@ -11,16 +11,15 @@
 //! | Update Type | When | Cost |
 //! |-------------|------|------|
 //! | `rebuild()` | Workspace count changes | ~10ms (full widget creation) |
-//! | `reorder_animate()` | Display order changed | ~0.5ms (reposition + animation) |
+//! | `reorder_animate()` | Display order changed | ~0.5ms (GTK child reorder) |
 //! | `update_state()` | Active workspace / CSS class changes | ~0.1ms |
 //! | `update_dots()` | Provider animation tick | ~0.01ms (just queue_draw) |
 //!
-//! ## Animation
+//! ## Layout
 //!
-//! Uses gtk::Fixed for manual button positioning, enabling smooth animated
-//! transitions when workspaces are reordered. The AnimationEngine uses
-//! exponential ease-out interpolation that's spam-safe (retargetable mid-flight)
-//! and frame-rate independent.
+//! Uses gtk::Box for workspace layout. GTK owns child size requisition/allocation
+//! so dynamic icon, label, badge, and font changes do not require richspace to
+//! guess widths.
 
 use gdk;
 use glib::prelude::IsA;
@@ -28,12 +27,11 @@ use glib::Propagation;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::app::{AppEvent, AppState};
 use crate::config::WindowCountDisplay;
 use crate::providers::RenderState;
-use super::animation::AnimationEngine;
 use super::context_menu::build_workspace_menu;
 
 const WORKSPACE_DND_TARGET: &str = "application/x-richspace-workspace";
@@ -64,13 +62,12 @@ struct ButtonState {
 
 /// Main workspace widget
 ///
-/// Uses gtk::Fixed for manual button positioning, enabling animated
-/// transitions when workspaces are reordered via keyboard or drag-and-drop.
+/// Uses gtk::Box for layout so GTK handles natural sizes for dynamic content.
 pub struct WorkspaceWidget {
     /// Outer event box (for scroll events)
     event_box: gtk::EventBox,
-    /// Inner container — gtk::Fixed for manual positioning (enables animation)
-    container: gtk::Fixed,
+    /// Inner container — gtk::Box handles child requisition/allocation.
+    container: gtk::Box,
     /// Persistent button state - reused across updates, sorted by display_position
     buttons: Rc<RefCell<Vec<ButtonState>>>,
     /// Event sender for click handling
@@ -87,13 +84,8 @@ pub struct WorkspaceWidget {
     /// smooth 60fps animation without IPC overhead. Babel sends raw intensity on
     /// ActivityPulse events, richspace decays it frame by frame.
     last_frame: Rc<RefCell<Instant>>,
-    /// Animation engine for smooth position transitions on reorder
-    animation: Rc<RefCell<AnimationEngine>>,
-    /// Current panel orientation (cached for position calculations)
+    /// Current panel orientation (mirrored onto the GTK box)
     orientation: RefCell<gtk::Orientation>,
-    /// Active animation tick source — runs at ~60fps during position animation only
-    /// Rc<RefCell> because the tick closure needs to clear itself on settle
-    animation_tick: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl WorkspaceWidget {
@@ -107,7 +99,8 @@ impl WorkspaceWidget {
             "WorkspaceWidget::new BEGIN"
         );
 
-        let container = gtk::Fixed::new();
+        let container = gtk::Box::new(state.orientation, state.config.spacing);
+        container.set_homogeneous(state.config.expand_buttons);
         container.style_context().add_class("richspace");
 
         // Wrap in EventBox for scroll events
@@ -146,9 +139,7 @@ impl WorkspaceWidget {
             last_rebuild: RefCell::new(Instant::now()),
             cached_workspace_count: RefCell::new(0),
             last_frame: Rc::new(RefCell::new(Instant::now())),
-            animation: Rc::new(RefCell::new(AnimationEngine::new())),
             orientation: RefCell::new(state.orientation),
-            animation_tick: Rc::new(RefCell::new(None)),
         };
 
         // Apply CSS
@@ -169,10 +160,10 @@ impl WorkspaceWidget {
         &self.event_box
     }
 
-    /// Set orientation — recalculates button positions
+    /// Set orientation on the GTK layout container
     pub fn set_orientation(&self, orientation: gtk::Orientation) {
         *self.orientation.borrow_mut() = orientation;
-        // Positions will be recalculated on next render
+        self.container.set_orientation(orientation);
     }
 
     // =========================================================================
@@ -185,7 +176,7 @@ impl WorkspaceWidget {
     /// - Workspace count changed → rebuild()
     /// - Otherwise → update_state()
     ///
-    /// For reorder animation, call reorder_animate() directly instead.
+    /// For reorder events, call reorder_animate() directly instead.
     pub fn render(&self, state: &AppState) {
         let start = Instant::now();
         let current_count = state.workspaces.len();
@@ -211,7 +202,7 @@ impl WorkspaceWidget {
     ///
     /// EXPENSIVE (~10ms) - Only call when workspace COUNT changes.
     /// For state updates, use update_state() instead.
-    /// For reorder animation, use reorder_animate() instead.
+    /// For reorder events, use reorder_animate() instead.
     pub fn rebuild(&self, state: &AppState) {
         let start = Instant::now();
         *self.last_rebuild.borrow_mut() = start;
@@ -224,14 +215,13 @@ impl WorkspaceWidget {
             "rebuild BEGIN"
         );
 
-        // Stop any running animation
-        self.stop_animation_tick();
-
         // Clear existing buttons
         for child in self.container.children() {
             self.container.remove(&child);
         }
         self.buttons.borrow_mut().clear();
+        self.container.set_spacing(state.config.spacing);
+        self.container.set_homogeneous(state.config.expand_buttons);
 
         // Build a map from workspace number to WorkspaceInfo for quick lookup
         let ws_map: std::collections::HashMap<i32, &crate::wnck::WorkspaceInfo> =
@@ -244,8 +234,12 @@ impl WorkspaceWidget {
                 let render_state = state.providers.get_render_state(ws.number).cloned();
                 let button_state = self.create_button_state(ws, state, render_state, self.last_frame.clone(), display_pos);
 
-                // Add to container at (0,0) initially — position_buttons will fix it
-                self.container.put(&button_state.button, 0, 0);
+                self.container.pack_start(
+                    &button_state.button,
+                    state.config.expand_buttons,
+                    state.config.expand_buttons,
+                    0,
+                );
                 new_buttons.push(button_state);
             }
         }
@@ -253,7 +247,6 @@ impl WorkspaceWidget {
         *self.buttons.borrow_mut() = new_buttons;
 
         self.container.show_all();
-        self.relayout_instant(state);
 
         tracing::debug!(
             elapsed_us = start.elapsed().as_micros(),
@@ -262,13 +255,13 @@ impl WorkspaceWidget {
         );
     }
 
-    /// Animate workspace buttons to new display order positions
+    /// Reorder workspace buttons to new display order positions
     ///
-    /// Called when display_order changes (reorder event). Does NOT recreate widgets —
-    /// just reorders the buttons vec, recalculates target positions, and starts
-    /// the animation tick. Buttons slide smoothly to their new positions.
+    /// Called when display_order changes (reorder event). Does NOT recreate widgets.
+    /// It reorders the persistent button vec and lets gtk::Box perform natural
+    /// layout. This intentionally keeps sizing in GTK rather than richspace.
     ///
-    /// FAST (~0.5ms) + animation frames at 60fps until settled.
+    /// FAST (~0.5ms).
     pub fn reorder_animate(&self, state: &AppState) {
         let start = Instant::now();
         let display_order = state.state.effective_display_order(state.workspaces.len());
@@ -277,9 +270,6 @@ impl WorkspaceWidget {
             display_order = ?display_order,
             "reorder_animate BEGIN"
         );
-
-        let orientation = *self.orientation.borrow();
-        let spacing = state.config.spacing as f64;
 
         // Reorder buttons vec to match new display order
         let mut buttons = self.buttons.borrow_mut();
@@ -338,40 +328,17 @@ impl WorkspaceWidget {
             }
         }
 
-        // Measure widths and calculate new target positions
-        let widths: Vec<f64> = buttons.iter().map(|bs| {
-            if orientation == gtk::Orientation::Horizontal {
-                let (_, natural) = bs.button.preferred_width();
-                natural.max(1) as f64
-            } else {
-                let (_, natural) = bs.button.preferred_height();
-                natural.max(1) as f64
-            }
-        }).collect();
-
-        let positions = AnimationEngine::compute_positions(&widths, spacing);
+        for (new_pos, bs) in buttons.iter().enumerate() {
+            self.container.reorder_child(&bs.button, new_pos as i32);
+        }
         drop(buttons);
 
-        // Set animated targets (don't snap — let them slide)
-        self.animation.borrow_mut().set_targets(&positions, false);
-
-        // Update container size request
-        let total = self.animation.borrow().total_extent(spacing);
-        if orientation == gtk::Orientation::Horizontal {
-            self.container.set_size_request(total.ceil() as i32, state.size);
-        } else {
-            self.container.set_size_request(state.size, total.ceil() as i32);
-        }
-
-        // Start animation tick
-        self.start_animation_tick();
-
         // Also update button state (CSS classes, labels, etc.)
-        self.update_state_inner(state, false);
+        self.update_state_inner(state);
 
         tracing::debug!(
             elapsed_us = start.elapsed().as_micros(),
-            "reorder_animate END — animation started"
+            "reorder_animate END"
         );
     }
 
@@ -380,11 +347,11 @@ impl WorkspaceWidget {
     /// CHEAP (~0.1ms) - Use for active workspace changes, rule matches, urgency, etc.
     /// Matches buttons by workspace_number (display-order-safe).
     pub fn update_state(&self, state: &AppState) {
-        self.update_state_inner(state, true);
+        self.update_state_inner(state);
     }
 
     /// Inner update_state implementation (avoids borrow issues when called from reorder_animate)
-    fn update_state_inner(&self, state: &AppState, relayout: bool) {
+    fn update_state_inner(&self, state: &AppState) {
         let start = Instant::now();
         let buttons = self.buttons.borrow();
 
@@ -438,13 +405,13 @@ impl WorkspaceWidget {
             let (icon_text, label_text) = self.get_workspace_display(ws, state);
 
             if let Some(ref icon_label) = bs.icon {
-                if let Some(text) = icon_text {
+                if let Some(ref text) = icon_text {
                     icon_label.set_markup(&text);
                 }
             }
 
             if let Some(ref label) = bs.label {
-                if let Some(text) = label_text {
+                if let Some(ref text) = label_text {
                     label.set_markup(&text);
                 }
                 // Update label active state CSS
@@ -477,11 +444,6 @@ impl WorkspaceWidget {
             button_count = buttons.len(),
             "update_state complete"
         );
-        drop(buttons);
-
-        if relayout {
-            self.relayout_instant(state);
-        }
     }
 
     /// Update dots only - just mutates render state and queues redraw
@@ -525,139 +487,6 @@ impl WorkspaceWidget {
             elapsed_us = start.elapsed().as_micros(),
             "CSS refreshed"
         );
-    }
-
-    // =========================================================================
-    // ANIMATION - Position management for gtk::Fixed
-    // =========================================================================
-
-    /// Apply current animation positions to buttons in the Fixed container
-    fn apply_positions(&self, state: &AppState) {
-        let buttons = self.buttons.borrow();
-        let anim = self.animation.borrow();
-        let orientation = *self.orientation.borrow();
-
-        for (i, bs) in buttons.iter().enumerate() {
-            if let Some(anim_state) = anim.buttons.get(i) {
-                let pos = anim_state.current.round() as i32;
-                if orientation == gtk::Orientation::Horizontal {
-                    self.container.move_(&bs.button, pos, 0);
-                } else {
-                    self.container.move_(&bs.button, 0, pos);
-                }
-            }
-        }
-
-        // Update container size request based on total extent
-        let spacing = state.config.spacing as f64;
-        let total = anim.total_extent(spacing).ceil() as i32;
-        if orientation == gtk::Orientation::Horizontal {
-            self.container.set_size_request(total, state.size);
-        } else {
-            self.container.set_size_request(state.size, total);
-        }
-    }
-
-    fn measure_button_extents(&self) -> Vec<f64> {
-        let buttons = self.buttons.borrow();
-        let orientation = *self.orientation.borrow();
-
-        buttons.iter().map(|bs| {
-            let allocated = if orientation == gtk::Orientation::Horizontal {
-                bs.button.allocated_width()
-            } else {
-                bs.button.allocated_height()
-            };
-            let (_, natural) = if orientation == gtk::Orientation::Horizontal {
-                bs.button.preferred_width()
-            } else {
-                bs.button.preferred_height()
-            };
-
-            // GTK can report tiny preferred sizes before a newly inserted child has
-            // settled. Keep the old allocation as a floor so Fixed positions do not
-            // collapse into a pile of 1px-wide buttons.
-            natural.max(allocated).max(1) as f64
-        }).collect()
-    }
-
-    fn relayout_instant(&self, state: &AppState) {
-        let spacing = state.config.spacing as f64;
-        let widths = self.measure_button_extents();
-        let positions = AnimationEngine::compute_positions(&widths, spacing);
-        self.animation.borrow_mut().set_targets(&positions, true);
-        self.apply_positions(state);
-
-        tracing::trace!(
-            widths = ?widths,
-            "workspace button layout recalculated"
-        );
-    }
-
-    /// Start the animation tick (60fps position updates)
-    ///
-    /// Runs until all buttons have settled, then stops automatically.
-    /// Safe to call multiple times — will not create duplicate ticks.
-    fn start_animation_tick(&self) {
-        // Don't start if already running
-        if self.animation_tick.borrow().is_some() {
-            return;
-        }
-
-        let animation = self.animation.clone();
-        let buttons = self.buttons.clone();
-        let container = self.container.clone();
-        let orientation = self.orientation.clone();
-        let animation_tick = self.animation_tick.clone();
-        let last_tick = Rc::new(RefCell::new(Instant::now()));
-
-        let source = glib::timeout_add_local(Duration::from_millis(16), move || {
-            let now = Instant::now();
-            let dt = {
-                let mut last = last_tick.borrow_mut();
-                let dt = now.duration_since(*last).as_secs_f64();
-                *last = now;
-                // Clamp dt to avoid huge jumps after stalls (e.g., system suspend)
-                dt.min(0.1)
-            };
-
-            let still_animating = animation.borrow_mut().tick(dt);
-
-            // Apply positions to Fixed container
-            let btns = buttons.borrow();
-            let anim = animation.borrow();
-            let orient = *orientation.borrow();
-            for (i, bs) in btns.iter().enumerate() {
-                if let Some(anim_state) = anim.buttons.get(i) {
-                    let pos = anim_state.current.round() as i32;
-                    if orient == gtk::Orientation::Horizontal {
-                        container.move_(&bs.button, pos, 0);
-                    } else {
-                        container.move_(&bs.button, 0, pos);
-                    }
-                }
-            }
-
-            if still_animating {
-                glib::ControlFlow::Continue
-            } else {
-                // Animation settled — clear the source ID
-                *animation_tick.borrow_mut() = None;
-                tracing::debug!("reorder animation settled");
-                glib::ControlFlow::Break
-            }
-        });
-
-        *self.animation_tick.borrow_mut() = Some(source);
-        tracing::debug!("reorder animation tick started");
-    }
-
-    /// Stop the animation tick if running
-    fn stop_animation_tick(&self) {
-        if let Some(source) = self.animation_tick.borrow_mut().take() {
-            source.remove();
-            tracing::debug!("reorder animation tick stopped");
-        }
     }
 
     // =========================================================================
@@ -907,8 +736,8 @@ impl WorkspaceWidget {
         // ─── Drag-and-Drop for workspace reordering ────────────────────────
         // Each button is both a drag source and destination. Dragging a button
         // onto another fires ReorderWorkspace with the display positions, which
-        // the app event loop translates into a display_order permutation +
-        // smooth animation via reorder_animate().
+        // the app event loop translates into a display_order permutation and a
+        // GTK child reorder.
         //
         // display_pos_cell is Rc<Cell> so closures always read the CURRENT position
         // after reorder_animate() updates it, avoiding stale DnD indices.
