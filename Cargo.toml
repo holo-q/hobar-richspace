@@ -26,7 +26,7 @@ gobject-sys = "0.18"
 gdk-sys = "0.18"
 
 # libwnck bindings (shared crate)
-wnck-rs = { path = "../../Lib/wnck-rs" }
+wnck-rs = { path = "../wnck-rs" }
 
 # File watching for live config reload
 notify = "6"
@@ -60,12 +60,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-journald = "0.3"
 
 # Spaceship shared logging infrastructure
-spaceship-std = { version = "0.2", path = "../../Lib/spaceship-std" }
+spaceship-std = { version = "0.2", path = "../spaceship-std" }
 regex = "1.12.2"
 
-# Claude-babel for shared indicator rendering. This panel is a GTK renderer,
+# Babel for shared indicator rendering. This panel is a GTK renderer,
 # so it explicitly opts into the GTK/Cairo drawing surface.
-claude-babel = { path = "../../Daemons/claude-babel", default-features = false, features = ["gtk-render"] }
+babel = { path = "../babel", default-features = false, features = ["gtk-render"] }
 
 [build-dependencies]
 pkg-config = "0.3"

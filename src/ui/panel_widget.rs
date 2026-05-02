@@ -680,22 +680,46 @@ impl WorkspaceWidget {
 
                     let mut any_animating = false;
                     for (i, dot) in render_state.dots.iter_mut().enumerate() {
-                        // Apply decay to ring intensity
-                        let mut intensity = dot.ring_intensity as f32;
-                        claude_babel::render::decay_ring(&mut intensity, dt_secs);
-                        dot.ring_intensity = intensity as f64;
+                        // Plain rings are momentary pulses. A ring_color
+                        // comes from babel as durable domain state, currently
+                        // unread completion, and persists until the provider
+                        // state clears it.
+                        if dot.ring_color.is_none() {
+                            let mut intensity = dot.ring_intensity as f32;
+                            babel::render::decay_ring(&mut intensity, dt_secs);
+                            dot.ring_intensity = intensity as f64;
 
-                        if intensity > 0.0 {
-                            any_animating = true;
+                            if intensity > 0.0 {
+                                any_animating = true;
+                            }
                         }
 
                         let x = start_x + i as f64 * spacing;
-                        let style = claude_babel::DotStyle {
-                            color: claude_babel::Rgb::new(dot.r, dot.g, dot.b),
-                            ring_intensity: dot.ring_intensity,
+                        let ring_color = dot.ring_color.as_deref().map(babel::Rgb::from_hex);
+                        if let Some(ring_color) = ring_color {
+                            if dot.ring_intensity > 0.01 {
+                                let ring_radius = dot_radius * (1.0 + dot.ring_intensity * 0.5);
+                                let ring_alpha = dot.ring_intensity * 0.4;
+                                ctx.set_source_rgba(
+                                    ring_color.r,
+                                    ring_color.g,
+                                    ring_color.b,
+                                    ring_alpha,
+                                );
+                                ctx.arc(x, center_y, ring_radius, 0.0, std::f64::consts::TAU);
+                                ctx.fill().ok();
+                            }
+                        }
+                        let style = babel::DotStyle {
+                            color: babel::Rgb::new(dot.r, dot.g, dot.b),
+                            ring_intensity: if ring_color.is_some() {
+                                0.0
+                            } else {
+                                dot.ring_intensity
+                            },
                             ..Default::default()
                         };
-                        claude_babel::render::render_dot(ctx, x, center_y, dot_radius, &style);
+                        babel::render::render_dot(ctx, x, center_y, dot_radius, &style);
                     }
 
                     // Schedule next frame if still animating

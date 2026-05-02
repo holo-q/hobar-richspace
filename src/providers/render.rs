@@ -72,6 +72,15 @@ pub struct RenderDot {
     #[serde(default, alias = "pulse")]
     pub ring_intensity: f64,
 
+    /// Optional hex color for a durable semantic ring.
+    ///
+    /// When absent, ring_intensity is a pulse and renderers may decay it.
+    /// When present, babel is carrying domain state such as unread completion,
+    /// so the ring should persist until the provider sends a later state
+    /// without ring_color.
+    #[serde(default)]
+    pub ring_color: Option<String>,
+
     /// Dot radius as fraction of button height
     #[serde(default = "default_radius")]
     pub radius: f64,
@@ -91,6 +100,7 @@ impl RenderDot {
             g,
             b,
             ring_intensity: 0.0,
+            ring_color: None,
             radius: default_radius(),
         }
     }
@@ -139,7 +149,12 @@ impl RenderState {
                 let ring_radius = radius * (1.0 + dot.ring_intensity * 0.5);
                 let ring_alpha = dot.ring_intensity * 0.4;
 
-                ctx.set_source_rgba(dot.r, dot.g, dot.b, ring_alpha);
+                let (ring_r, ring_g, ring_b) = dot
+                    .ring_color
+                    .as_deref()
+                    .map(parse_hex_color)
+                    .unwrap_or((dot.r, dot.g, dot.b));
+                ctx.set_source_rgba(ring_r, ring_g, ring_b, ring_alpha);
                 ctx.arc(x, y, ring_radius, 0.0, TAU);
                 ctx.fill().ok();
             }
