@@ -144,19 +144,29 @@ impl RenderState {
             let y = dot.y * height;
             let radius = dot.radius * height;
 
-            // Draw ring glow (if any) - animated effect during activity
+            // Draw ring glow (if any). Plain pulses stay soft; semantic
+            // ring_color states, such as unread completion, need a real halo
+            // so they survive small XFCE panel dots.
             if dot.ring_intensity > 0.01 {
-                let ring_radius = radius * (1.0 + dot.ring_intensity * 0.5);
-                let ring_alpha = dot.ring_intensity * 0.4;
-
                 let (ring_r, ring_g, ring_b) = dot
                     .ring_color
                     .as_deref()
                     .map(parse_hex_color)
                     .unwrap_or((dot.r, dot.g, dot.b));
-                ctx.set_source_rgba(ring_r, ring_g, ring_b, ring_alpha);
-                ctx.arc(x, y, ring_radius, 0.0, TAU);
-                ctx.fill().ok();
+                if dot.ring_color.is_some() {
+                    let ring_width = 2.5_f64.max(radius * 0.55);
+                    let ring_radius = radius + ring_width + dot.ring_intensity * radius * 0.5;
+                    ctx.set_source_rgba(ring_r, ring_g, ring_b, 0.9);
+                    ctx.arc(x, y, ring_radius, 0.0, TAU);
+                    ctx.set_line_width(ring_width);
+                    ctx.stroke().ok();
+                } else {
+                    let ring_radius = radius * (1.0 + dot.ring_intensity * 0.5);
+                    let ring_alpha = dot.ring_intensity * 0.4;
+                    ctx.set_source_rgba(ring_r, ring_g, ring_b, ring_alpha);
+                    ctx.arc(x, y, ring_radius, 0.0, TAU);
+                    ctx.fill().ok();
+                }
             }
 
             // Draw main dot

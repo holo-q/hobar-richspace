@@ -36,6 +36,8 @@ use crate::providers::RenderState;
 
 const WORKSPACE_DND_TARGET: &str = "application/x-richspace-workspace";
 const XFCE_WINDOW_DND_TARGET: &str = "application/x-wnck-window-id";
+const DURABLE_RING_MIN_WIDTH: f64 = 2.5;
+const DURABLE_RING_ALPHA: f64 = 0.9;
 const BABEL_WORKSPACE_CLASSES: &[&str] = &[
     "claude-idle",
     "claude-busy",
@@ -698,16 +700,18 @@ impl WorkspaceWidget {
                         let ring_color = dot.ring_color.as_deref().map(babel::Rgb::from_hex);
                         if let Some(ring_color) = ring_color {
                             if dot.ring_intensity > 0.01 {
-                                let ring_radius = dot_radius * (1.0 + dot.ring_intensity * 0.5);
-                                let ring_alpha = dot.ring_intensity * 0.4;
+                                let ring_width = DURABLE_RING_MIN_WIDTH;
+                                let ring_radius =
+                                    dot_radius + ring_width + dot.ring_intensity * dot_radius * 0.5;
                                 ctx.set_source_rgba(
                                     ring_color.r,
                                     ring_color.g,
                                     ring_color.b,
-                                    ring_alpha,
+                                    DURABLE_RING_ALPHA,
                                 );
                                 ctx.arc(x, center_y, ring_radius, 0.0, std::f64::consts::TAU);
-                                ctx.fill().ok();
+                                ctx.set_line_width(ring_width);
+                                ctx.stroke().ok();
                             }
                         }
                         let style = babel::DotStyle {
