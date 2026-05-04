@@ -2,7 +2,7 @@
 
 This document contains the exact changes needed to migrate from local FFI to xfce-panel-rs.
 
-**Prerequisites:** xfce-panel-rs must exist at `/home/nuck/Workspace/Lib/xfce-panel-rs/`
+**Prerequisites:** xfce-panel-rs must exist at `~/Workspace/Lib/xfce-panel-rs/`
 
 ## Step 1: Update Cargo.toml
 

@@ -2,7 +2,7 @@
 
 ## Summary
 
-This plugin currently implements its own minimal XFCE panel FFI bindings (~150 lines total across ffi.rs + plugin.rs). Worker-1 is creating `/home/nuck/Workspace/Lib/xfce-panel-rs/` as a shared crate to replace this duplication across all panel plugins.
+This plugin currently implements its own minimal XFCE panel FFI bindings (~150 lines total across ffi.rs + plugin.rs). Worker-1 is creating `~/Workspace/Lib/xfce-panel-rs/` as a shared crate to replace this duplication across all panel plugins.
 
 **Migration Complexity:** LOW - This is the simplest plugin with minimal FFI usage.
 
