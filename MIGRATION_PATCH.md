@@ -197,7 +197,7 @@ xfce4-panel -r
 
 ### Before Migration
 ```
-Compiling xfce4-panel-richspace v0.1.0
+Compiling hobar-richspace v0.1.0
   - Using local FFI (src/xfce/ffi.rs)
   - Direct gtk-sys/glib-sys dependencies
 ```
@@ -205,7 +205,7 @@ Compiling xfce4-panel-richspace v0.1.0
 ### After Migration
 ```
 Compiling xfce-panel-rs v0.1.0
-Compiling xfce4-panel-richspace v0.1.0
+Compiling hobar-richspace v0.1.0
   - Using shared xfce-panel-rs crate
   - No direct sys dependencies
 ```

@@ -1,6 +1,6 @@
-# xfce4-panel-richspace
+# hobar-richspace
 
-XFCE4 panel plugin for rich, configurable workspace/window visualization. A drop-in
+Panel plugin for rich, configurable workspace/window visualization. A drop-in
 replacement for the stock workspace switcher that adds:
 
 - **Configurable per-workspace labels** — number, WM name, or custom string

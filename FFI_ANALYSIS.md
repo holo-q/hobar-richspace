@@ -1,4 +1,4 @@
-# xfce4-panel-richspace FFI Analysis
+# hobar-richspace FFI Analysis
 
 ## Executive Summary
 

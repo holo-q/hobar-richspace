@@ -1,9 +1,10 @@
 [package]
-name = "xfce4-panel-richspace"
+name = "hobar-richspace"
 version = "0.1.0"
 edition = "2021"
 authors = ["nuck"]
-description = "Custom workspace display for XFCE4 panel with configurable labels and icons (emoji, fontawesome, nerd font)"
+description = "Rich workspace switcher panel plugin — configurable labels, icon rules, animated reorder, IPC provider dots"
+repository = "https://github.com/holo-q/hobar-richspace"
 license = "GPL-2.0-or-later"
 
 [lib]
